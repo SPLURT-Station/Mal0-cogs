@@ -1,6 +1,6 @@
 #General imports
 import os, random, validators
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 #Discord imports
@@ -66,7 +66,8 @@ class SChangelog(BaseCog):
         embed = discord.Embed(
             title=embedTitle,
             description=f"There are currently **{numCh}** active changelogs.",
-            color=discord.Colour.from_rgb(*eColor)
+            color=discord.Colour.from_rgb(*eColor),
+            timestamp=datetime.now()
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
         embed.set_footer(text=random.choice(footers), icon_url=ctx.me.avatar_url)
