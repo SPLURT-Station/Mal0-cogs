@@ -47,6 +47,7 @@ class SChangelog(BaseCog):
         gitlink = await self.config.guild(guild).gitlink()
         eColor = await self.config.guild(guild).embed_color()
         role = await self.config.guild(guild).mentionrole()
+        role = await discord.utils.get(guild.roles, id=role)
         message = ""
 
         if not channel:
@@ -103,7 +104,6 @@ class SChangelog(BaseCog):
 
         This command is supposed to be used in tandem with a command scheduler cog like https://github.com/bobloy/Fox-V3 's fifo in order to create an automatic changelogs channel.
         make sure that you set the auto changelogs to a time before they get compiled in the repo or this command will be useless!
-
         """
         await self._send_cl_embed(ctx, channel)
 
@@ -119,7 +119,8 @@ class SChangelog(BaseCog):
             gitlink = await self.config.guild(guild).gitlink()
             eColor = await self.config.guild(guild).embed_color()
             role = await self.config.guild(guild).mentionrole()
-
+            role = discord.utils.get(guild.roles, id=role)
+            
             message = f"""
 Current config:
   - repo: {instance}
@@ -176,7 +177,7 @@ Current config:
         
         Defaults to none
         """
-        await self.config.guild(ctx.guild).mentionrole.set(newRole)
+        await self.config.guild(ctx.guild).mentionrole.set(newRole.id)
         await ctx.tick()
     
     @set.command(name="reset")
