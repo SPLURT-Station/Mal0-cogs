@@ -1,0 +1,19 @@
+{
+    "author": [
+        "Mosley"
+    ],
+    "description": "Post SS13 changelogs for a specific TGS instance.",
+    "install_msg": "Reminder that you must configure the path of the instance before using. The `channel` command is supposed to be used alongside a scheduler cog, so keep that in mind.",
+    "short": "SS13 changelogs",
+    "Name": "SS13 Changelogs",
+    "requirements": [
+        "validators"
+    ],
+    "tags": [
+        "Space Station 13",
+        "SS13",
+        "Game",
+        "Changelogs",
+        "Utility"
+    ]
+}
