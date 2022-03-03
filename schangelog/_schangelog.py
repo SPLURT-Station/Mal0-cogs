@@ -133,11 +133,16 @@ Current config:
     
     @set.command(name="repo")
     @checks.is_owner()
-    async def repository(self, ctx: commands.Context, *, new_repo: str):
+    async def repository(self, ctx: commands.Context, *, new_repo: Optional[str]):
         """
         Change the Changelog Repository
         """
         guild = ctx.guild
+        if not new_repo:
+            await self.config.guild(guild).instancerepo.clear()
+            await ctx.send("`repo` has been reset to its default value")
+            return
+
         try:
             location = os.path.abspath(new_repo)
             if not os.path.exists(location):
@@ -151,10 +156,16 @@ Current config:
         return
     
     @set.command(name="link")
-    async def set_gitlink(self, ctx: commands.Context, *, newLink: str):
+    async def set_gitlink(self, ctx: commands.Context, *, newLink: Optional[str]):
         """
         Change the link that clicking on the changelog's author will direct to
         """
+
+        if not newLink:
+            await self.config.guild(ctx.guild).gitlink.clear()
+            await ctx.send("`link` has been reset to its default value")
+            return
+
         if not validators.url(newLink):
             await ctx.send("That's not a valid link!")
             return
@@ -163,20 +174,31 @@ Current config:
         await ctx.tick()
     
     @set.command(name="color")
-    async def set_color(self, ctx: commands.Context, *, newColor: discord.Colour):
+    async def set_color(self, ctx: commands.Context, *, newColor: Optional[discord.Colour]):
         """
         Change the color of the changelog embeds
         """
+
+        if not newColor:
+            await self.config.guild(ctx.guild).embed_color.clear()
+            await ctx.send("`color` has been reset to its default value")
+            return
+
         await self.config.guild(ctx.guild).embed_color.set(newColor.to_rgb())
         await ctx.tick()
     
     @set.command(name="role")
-    async def set_mrole(self, ctx: commands.Context, *, newRole: discord.Role):
+    async def set_mrole(self, ctx: commands.Context, *, newRole: Optional[discord.Role]):
         """
         Change the role that will be pinged when using the channel command.
         
         Defaults to none
         """
+        if not newRole:
+            await self.config.guild(ctx.guild).mentionrole.clear()
+            await ctx.send("`role` has been reset to its default value")
+            return
+        
         await self.config.guild(ctx.guild).mentionrole.set(newRole.id)
         await ctx.tick()
     
