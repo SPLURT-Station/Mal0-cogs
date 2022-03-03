@@ -124,7 +124,7 @@ Current config:
   - repo: {instance}
   - link: {gitlink}
   - color: {eColor}
-  - role: {role.name}
+  - role: {role}
 """.strip()
 
             await ctx.send(chat_formatting.box(message, "yaml"))
