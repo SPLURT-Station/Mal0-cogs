@@ -47,7 +47,6 @@ class SChangelog(BaseCog):
         gitlink = await self.config.guild(guild).gitlink()
         eColor = await self.config.guild(guild).embed_color()
         role = await self.config.guild(guild).mentionrole()
-        role = discord.utils.get(guild.roles, id=role)
         message = ""
 
         if not channel:
@@ -60,7 +59,7 @@ class SChangelog(BaseCog):
             return await channel.send("There is no configured repo yet!")
 
         if role:
-            message = f"{role.mention}"
+            message = f"<@{role}>"
         
         (numCh, changes) = reader(instance)
 
