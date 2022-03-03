@@ -32,7 +32,7 @@ class SChangelog(BaseCog):
             "instancerepo": None,
             "gitlink": "https://github.com/SPLURT-Station/Mal0-cogs",
             "footer_lines": ["Changelogs"],
-            "embed_color": discord.Colour.from_rgb(255, 79, 240),
+            "embed_color": (255, 79, 240),
             "mentionrole": None
         }
 
@@ -66,7 +66,7 @@ class SChangelog(BaseCog):
         embed = discord.Embed(
             title=embedTitle,
             description=f"There are currently **{numCh}** active changelogs.",
-            color=eColor
+            color=discord.Colour.from_rgb(eColor)
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
         embed.set_footer(text=random.choice(footers), icon_url=ctx.me.avatar_url)
@@ -101,7 +101,7 @@ class SChangelog(BaseCog):
         Send the changelogs to a certain specific channel
 
         This command is supposed to be used in tandem with a command scheduler cog like https://github.com/bobloy/Fox-V3 's fifo in order to create an automatic changelogs channel.
-        make sure that you set the auto changelogs to a time before they get compiled in the repo or this cog will be useless!
+        make sure that you set the auto changelogs to a time before they get compiled in the repo or this command will be useless!
 
         """
         await self._send_cl_embed(ctx, channel)
@@ -123,7 +123,7 @@ class SChangelog(BaseCog):
 Current config:
   - repo: {instance}
   - link: {gitlink}
-  - color: {eColor}
+  - color: {discord.Colour.from_rgb(eColor)}
   - role: {role}
 """.strip()
 
@@ -165,7 +165,7 @@ Current config:
         """
         Change the color of the changelog embeds
         """
-        await self.config.guild(ctx.guild).embed_color.set(newColor)
+        await self.config.guild(ctx.guild).embed_color.set(newColor.to_rgb())
         await ctx.tick()
     
     @set.command(name="role")
