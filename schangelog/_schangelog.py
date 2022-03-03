@@ -82,7 +82,8 @@ class SChangelog(BaseCog):
                     cont += "\n  - " + i
             embed.add_field(name=author, value=chat_formatting.box(cont.strip(), "yaml"), inline=False)
         
-        await channel.send(message, embed=embed)
+        await channel.send(message)
+        await channel.send(embed=embed)
         #lines = ["Creating THE furry cum dungeon, one PR at the time.", "\"Code it yourself.\"", "These people work very hard. Someone give them love.", "We love you :3", "\"Literally 1984.\""]
 
     @commands.guild_only()
