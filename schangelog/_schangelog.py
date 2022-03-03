@@ -87,10 +87,10 @@ class SChangelog(BaseCog):
     @commands.group(aliases=["scl"])
     async def schangelog(self, ctx):
         """
-        SS13 changelog main commmand
+        SS13 changelog main commmand. Use this to post the active changelogs in the current channel.
         """
         if ctx.invoked_subcommand is None:
-            await self._send_cl_embed(ctx)
+            await self._send_cl_embed(ctx, None)
 
     @schangelog.command()
     @checks.admin_or_permissions(administrator=True)
