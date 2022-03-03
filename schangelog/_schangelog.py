@@ -184,7 +184,7 @@ Current config:
         Command to edit and manage footers of the changelogs
         """
         if ctx.invoked_subcommand is None:
-            footers = await self.config.guild(ctx.guild).footers()
+            footers = await self.config.guild(ctx.guild).footer_lines()
             message = ""
             for i in range(len(footers)):
                 message += f"{i+1}. {footers[i]}\n"
@@ -195,9 +195,9 @@ Current config:
         """
         Add a footer to the list of footers that can appear in the changelogs
         """
-        current = await self.config.guild(ctx.guild).footers()
+        current = await self.config.guild(ctx.guild).footer_lines()
         current.append(newF)
-        await self.config.guild(ctx.guild).footers.set(current)
+        await self.config.guild(ctx.guild).footer_lines.set(current)
         await ctx.tick()
     
     @footers.command(name="delete")
@@ -206,7 +206,7 @@ Current config:
         Remove a footer from the footer list
         """
         toDelete = delF - 1
-        current = await self.config.guild(ctx.guild).footers()
+        current = await self.config.guild(ctx.guild).footer_lines()
         if (len(current) <= 1):
             return await ctx.send("There must be at least 1 active footer.")
         try:
@@ -214,5 +214,5 @@ Current config:
         except IndexError:
             await ctx.send("Footer not found.")
             return
-        await self.config.guild(ctx.guild).footers.set(current)
+        await self.config.guild(ctx.guild).footer_lines.set(current)
         await ctx.tick()
