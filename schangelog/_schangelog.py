@@ -40,7 +40,7 @@ class SChangelog(BaseCog):
 
     async def _send_cl_embed(self, ctx: commands.Context, channel: Optional[discord.TextChannel]):
         now = date.today()
-        guild = ctx.guild()
+        guild = ctx.guild
         guildpic = guild.icon_url
         instance = await self.config.guild(guild).instancerepo()
         footers = await self.config.guild(guild).footer_lines()
@@ -113,7 +113,7 @@ class SChangelog(BaseCog):
         Changelog Configuration
         """
         if ctx.invoked_subcommand is None:
-            guild = ctx.guild()
+            guild = ctx.guild
             instance = await self.config.guild(guild).instancerepo()
             gitlink = await self.config.guild(guild).gitlink()
             eColor = await self.config.guild(guild).embed_color()
@@ -135,7 +135,7 @@ Current config:
         """
         Change the Changelog Repository
         """
-        guild = ctx.guild()
+        guild = ctx.guild
         try:
             location = os.path.abspath(new_repo)
             if not os.path.exists(location):
@@ -157,7 +157,7 @@ Current config:
             await ctx.send("That's not a valid link!")
             return
         
-        await self.config.guild(ctx.guild()).gitlink.set(newLink)
+        await self.config.guild(ctx.guild).gitlink.set(newLink)
         await ctx.tick()
     
     @set.command(name="color")
@@ -165,7 +165,7 @@ Current config:
         """
         Change the color of the changelog embeds
         """
-        await self.config.guild(ctx.guild()).embed_color.set(newColor)
+        await self.config.guild(ctx.guild).embed_color.set(newColor)
         await ctx.tick()
     
     @set.command(name="role")
@@ -175,7 +175,7 @@ Current config:
         
         Defaults to none
         """
-        await self.config.guild(ctx.guild()).mentionrole.set(newRole)
+        await self.config.guild(ctx.guild).mentionrole.set(newRole)
         await ctx.tick()
     
     @set.group()
@@ -184,7 +184,7 @@ Current config:
         Command to edit and manage footers of the changelogs
         """
         if ctx.invoked_subcommand is None:
-            footers = await self.config.guild(ctx.guild()).footers()
+            footers = await self.config.guild(ctx.guild).footers()
             message = ""
             for i in range(len(footers)):
                 message += f"{i+1}. {footers[i]}\n"
@@ -195,9 +195,9 @@ Current config:
         """
         Add a footer to the list of footers that can appear in the changelogs
         """
-        current = await self.config.guild(ctx.guild()).footers()
+        current = await self.config.guild(ctx.guild).footers()
         current.append(newF)
-        await self.config.guild(ctx.guild()).footers.set(current)
+        await self.config.guild(ctx.guild).footers.set(current)
         await ctx.tick()
     
     @footers.command(name="delete")
@@ -206,7 +206,7 @@ Current config:
         Remove a footer from the footer list
         """
         toDelete = delF - 1
-        current = await self.config.guild(ctx.guild()).footers()
+        current = await self.config.guild(ctx.guild).footers()
         if (len(current) <= 1):
             return await ctx.send("There must be at least 1 active footer.")
         try:
@@ -214,5 +214,5 @@ Current config:
         except IndexError:
             await ctx.send("Footer not found.")
             return
-        await self.config.guild(ctx.guild()).footers.set(current)
+        await self.config.guild(ctx.guild).footers.set(current)
         await ctx.tick()
