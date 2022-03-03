@@ -84,7 +84,7 @@ class SChangelog(BaseCog):
         #lines = ["Creating THE furry cum dungeon, one PR at the time.", "\"Code it yourself.\"", "These people work very hard. Someone give them love.", "We love you :3", "\"Literally 1984.\""]
 
     @commands.guild_only()
-    @commands.group(aliases=["scl"])
+    @commands.group(invoke_without_command=True, aliases=["scl"])
     async def schangelog(self, ctx):
         """
         SS13 changelog main commmand. 
@@ -178,7 +178,7 @@ Current config:
         await self.config.guild(ctx.guild).mentionrole.set(newRole)
         await ctx.tick()
     
-    @set.group()
+    @set.group(invoke_without_command=True)
     async def footers(self, ctx: commands.Context):
         """
         Command to edit and manage footers of the changelogs
