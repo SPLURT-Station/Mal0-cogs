@@ -87,7 +87,9 @@ class SChangelog(BaseCog):
     @commands.group(aliases=["scl"])
     async def schangelog(self, ctx):
         """
-        SS13 changelog main commmand. Use this to post the active changelogs in the current channel.
+        SS13 changelog main commmand. 
+        
+        Use this to post the active changelogs in the current channel.
         """
         if ctx.invoked_subcommand is None:
             await self._send_cl_embed(ctx, None)
@@ -97,6 +99,10 @@ class SChangelog(BaseCog):
     async def channel(self, ctx: commands.Context, *, channel: discord.TextChannel):
         """
         Send the changelogs to a certain specific channel
+
+        This command is supposed to be used in tandem with a command scheduler cog like https://github.com/bobloy/Fox-V3 's fifo in order to create an automatic changelogs channel.
+        make sure that you set the auto changelogs to a time before they get compiled in the repo or this cog will be useless!
+
         """
         await self._send_cl_embed(ctx, channel)
 
