@@ -11,7 +11,7 @@ from redbot.core import commands, Config, checks
 from redbot.core.utils import chat_formatting
 
 #Folder imports
-from reader import reader
+from .reader import reader
 
 BaseCog = getattr(commands, "Cog", object)
 
