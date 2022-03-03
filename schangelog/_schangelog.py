@@ -47,7 +47,7 @@ class SChangelog(BaseCog):
         gitlink = await self.config.guild(guild).gitlink()
         eColor = await self.config.guild(guild).embed_color()
         role = await self.config.guild(guild).mentionrole()
-        role = await discord.utils.get(guild.roles, id=role)
+        role = discord.utils.get(guild.roles, id=role)
         message = ""
 
         if not channel:
