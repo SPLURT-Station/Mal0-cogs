@@ -69,7 +69,7 @@ class SChangelog(BaseCog):
             color=eColor
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
-        embed.set_footer(text=random.choice(footers), icon_url=self.bot.icon_url)
+        embed.set_footer(text=random.choice(footers), icon_url=ctx.me.avatar_url)
         embed.set_thumbnail(url=guildpic)
         for k, v in changes.items():
             author = k
