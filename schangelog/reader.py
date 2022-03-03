@@ -4,7 +4,6 @@ def reader(instancePath):
     """
     Used for reading and organizing the yaml files
     """
-
     if not os.path.exists(instancePath):
         return
     clPath = os.path.join(os.path.abspath(instancePath), "Repository/html/changelogs")

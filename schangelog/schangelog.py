@@ -11,7 +11,7 @@ from redbot.core import commands, Config, checks
 from redbot.core.utils import chat_formatting
 
 #Folder imports
-import reader
+from reader import reader
 
 BaseCog = getattr(commands, "Cog", object)
 
@@ -61,7 +61,7 @@ class SChangelog(BaseCog):
         if role:
             message = f"{role.mention}"
         
-        (numCh, changes) = reader.reader(instance)
+        (numCh, changes) = reader(instance)
 
         embed = discord.Embed(
             title=embedTitle,
