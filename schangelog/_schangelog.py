@@ -178,6 +178,10 @@ Current config:
         await self.config.guild(ctx.guild).mentionrole.set(newRole)
         await ctx.tick()
     
+    @set.command(name="reset")
+    async def reset_config(self, ctx: commands.Context):
+        await self.config.guild(ctx.guild).clear()
+    
     @set.group(invoke_without_command=True)
     async def footers(self, ctx: commands.Context):
         """
