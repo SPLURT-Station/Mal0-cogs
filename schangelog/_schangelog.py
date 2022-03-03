@@ -180,7 +180,13 @@ Current config:
     
     @set.command(name="reset")
     async def reset_config(self, ctx: commands.Context):
+        """
+        Reset all the data for the current guild
+
+        This will clear everything, be careful!
+        """
         await self.config.guild(ctx.guild).clear()
+        await ctx.tick()
     
     @set.group(invoke_without_command=True)
     async def footers(self, ctx: commands.Context):
