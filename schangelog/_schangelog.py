@@ -50,7 +50,7 @@ class SChangelog(BaseCog):
         message = ""
 
         if not channel:
-            channel = ctx.channel()
+            channel = ctx.channel
             embedTitle = "Currently active changelogs"
         else:
             embedTitle = now.strftime("%d/%m/%Y")
