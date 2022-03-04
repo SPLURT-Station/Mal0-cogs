@@ -32,6 +32,7 @@ class SChangelog(BaseCog):
             "instancerepo": None,
             "gitlink": "https://github.com/SPLURT-Station/Mal0-cogs",
             "footer_lines": ["Changelogs"],
+            "last_footer": None,
             "embed_color": (255, 79, 240),
             "mentionrole": None
         }
@@ -64,6 +65,11 @@ class SChangelog(BaseCog):
         
         (numCh, changes) = reader(instance)
 
+        footer = random.choice(footers)
+        while (len(footers) > 1) and footer == await self.config.guild(guild).last_footer():
+            footer = random.choice(footers)
+        await self.config.guild(guild).last_footer.set(footer)
+        
         embed = discord.Embed(
             title=embedTitle,
             description=f"There are currently **{numCh}** active changelogs.",
@@ -71,7 +77,7 @@ class SChangelog(BaseCog):
             timestamp=datetime.now()
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
-        embed.set_footer(text=random.choice(footers), icon_url=ctx.me.avatar_url)
+        embed.set_footer(text=footer, icon_url=ctx.me.avatar_url)
         embed.set_thumbnail(url=guildpic)
         for k, v in changes.items():
             author = k
@@ -83,7 +89,6 @@ class SChangelog(BaseCog):
             embed.add_field(name=author, value=chat_formatting.box(cont.strip(), "yaml"), inline=False)
         
         await channel.send(message, embed=embed)
-        #lines = ["Creating THE furry cum dungeon, one PR at the time.", "\"Code it yourself.\"", "These people work very hard. Someone give them love.", "We love you :3", "\"Literally 1984.\""]
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
