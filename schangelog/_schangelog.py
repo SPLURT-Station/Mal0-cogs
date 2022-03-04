@@ -69,12 +69,12 @@ class SChangelog(BaseCog):
         while (len(footers) > 1) and footer == await self.config.guild(guild).last_footer():
             footer = random.choice(footers)
         await self.config.guild(guild).last_footer.set(footer)
-        
+
         embed = discord.Embed(
             title=embedTitle,
             description=f"There are currently **{numCh}** active changelogs.",
             color=discord.Colour.from_rgb(*eColor),
-            timestamp=datetime.now()
+            timestamp=datetime.utcnow()
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
         embed.set_footer(text=footer, icon_url=ctx.me.avatar_url)
