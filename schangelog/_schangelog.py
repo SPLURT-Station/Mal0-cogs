@@ -88,7 +88,7 @@ class SChangelog(BaseCog):
                     cont += "\n  - " + i
             embed.add_field(name=author, value=chat_formatting.box(cont.strip(), "yaml"), inline=False)
         
-        await channel.send(message, embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
+        await channel.send(message, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
