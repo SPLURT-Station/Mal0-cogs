@@ -21,7 +21,7 @@ class SChangelog(BaseCog):
     """
 
     __author__ = "Mosley"
-    __version__ = "1.0.0"
+    __version__ = "1.1.0"
 
     def __init__(self, bot):
         self.bot = bot
@@ -60,8 +60,12 @@ class SChangelog(BaseCog):
         if day == now.strftime("%Y-%m-%d"):
             embedTitle = "Currently active changelogs"
         else:
-            embedTitle = datetime.strptime(day, "%Y-%m-%d")
-            embedTitle = embedTitle.strftime("%d/%m/%Y")
+            try:
+                embedTitle = datetime.strptime(day, "%Y-%m-%d")
+                embedTitle = embedTitle.strftime("%d/%m/%Y")
+            except:
+                embedTitle = "Error"
+
         
         if not instance:
             return await channel.send("There is no configured repo yet!")
