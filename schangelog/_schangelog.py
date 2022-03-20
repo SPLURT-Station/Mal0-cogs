@@ -49,6 +49,7 @@ class SChangelog(BaseCog):
         eColor = await self.config.guild(guild).embed_color()
         role = await self.config.guild(guild).mentionrole()
         role = discord.utils.get(guild.roles, id=role)
+        numCh = 0
         nullCl = ""
         message = ""
 
@@ -114,9 +115,11 @@ class SChangelog(BaseCog):
     @commands.group(invoke_without_command=True, aliases=["scl"])
     async def schangelog(self, ctx, *, today = date.today().strftime("%Y-%m-%d")):
         """
-        SS13 changelog main commmand. 
+        SS13 changelogs
         
         Use this to post the active changelogs in the current channel.
+
+        - Today: Date of the changelog you want to get. in YYYY-mm-d format. (defaults to today)
         """
         if ctx.invoked_subcommand is None:
             await self._send_cl_embed(ctx, channel=None, day=today)
