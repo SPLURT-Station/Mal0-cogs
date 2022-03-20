@@ -9,7 +9,7 @@ def change_to_tuples(dict):
 class RepoError(Exception):
     pass
 
-def readCl(instancePath, dateOverride = datetime.date.today().strftime("%Y-%m-%d")):
+def readCl(instancePath, dateOverride):
     """
     Used for reading and organizing the yaml Changelog Files
     """
