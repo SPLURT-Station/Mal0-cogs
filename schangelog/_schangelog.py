@@ -54,6 +54,7 @@ class SChangelog(BaseCog):
 
         if not channel:
             channel = ctx.channel
+            role = None
         
         if day == now.strftime("%Y-%m-%d"):
             embedTitle = "Currently active changelogs"
