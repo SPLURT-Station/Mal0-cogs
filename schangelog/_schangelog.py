@@ -75,7 +75,7 @@ class SChangelog(BaseCog):
         try:
             (changes, numCh) = readCl(instance, day)
         except ValueError:
-            return await channel.send("That's not a date, dummy")
+            return await channel.send("That's not a valid date, dummy")
         except AttributeError:
             nullCl = "\nSeems like nothing happened on this day"
         except RepoError as e:
