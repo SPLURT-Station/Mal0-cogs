@@ -130,3 +130,6 @@ dmypy.json
 
 # VSCode run data
 .vscode/launch.json
+
+# Backup Stuff
+*.ffs_db
