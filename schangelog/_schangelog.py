@@ -11,7 +11,7 @@ from redbot.core import commands, Config, checks
 from redbot.core.utils import chat_formatting
 
 #Folder imports
-from .reader import reader
+from .reader import readCl, RepoError
 
 BaseCog = getattr(commands, "Cog", object)
 
@@ -39,7 +39,7 @@ class SChangelog(BaseCog):
 
         self.config.register_guild(**default_guild)
 
-    async def _send_cl_embed(self, ctx: commands.Context, channel: Optional[discord.TextChannel]):
+    async def _send_cl_embed(self, ctx: commands.Context, channel: Optional[discord.TextChannel], day: Optional[str]):
         now = date.today()
         guild = ctx.guild
         guildpic = guild.icon_url
@@ -49,21 +49,38 @@ class SChangelog(BaseCog):
         eColor = await self.config.guild(guild).embed_color()
         role = await self.config.guild(guild).mentionrole()
         role = discord.utils.get(guild.roles, id=role)
+        numCh = 0
+        nullCl = ""
         message = ""
 
         if not channel:
             channel = ctx.channel
+            role = None
+        
+        if day == now.strftime("%Y-%m-%d"):
             embedTitle = "Currently active changelogs"
         else:
-            embedTitle = now.strftime("%d/%m/%Y")
+            embedTitle = datetime.strptime(day, "%Y-%m-%d")
+            embedTitle = embedTitle.strftime("%d/%m/%Y")
         
         if not instance:
             return await channel.send("There is no configured repo yet!")
 
         if role:
             message = f"{role.mention}"
-        
-        (numCh, changes) = reader(instance)
+        try:
+            (changes, numCh) = readCl(instance, day)
+        except ValueError:
+            return await channel.send("That's not a date, dummy")
+        except AttributeError:
+            nullCl = "\nSeems like nothing happened on this day"
+        except RepoError as e:
+            return await channel.send(str(e))
+        except Exception as e:
+            raise e
+
+        if numCh < 1:
+            message = ""
 
         footer = random.choice(footers)
         while (len(footers) > 1) and footer == await self.config.guild(guild).last_footer():
@@ -72,13 +89,17 @@ class SChangelog(BaseCog):
 
         embed = discord.Embed(
             title=embedTitle,
-            description=f"There are currently **{numCh}** active changelogs.",
+            description=f"There were **{numCh}** active changelogs." + nullCl,
             color=discord.Colour.from_rgb(*eColor),
             timestamp=datetime.utcnow()
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
         embed.set_footer(text=footer, icon_url=ctx.me.avatar_url)
         embed.set_thumbnail(url=guildpic)
+
+        if len(nullCl):
+            return await channel.send(message, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
+
         for k, v in changes.items():
             author = k
             cont = ""
@@ -92,14 +113,16 @@ class SChangelog(BaseCog):
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
-    async def schangelog(self, ctx):
+    async def schangelog(self, ctx, *, today = date.today().strftime("%Y-%m-%d")):
         """
-        SS13 changelog main commmand. 
+        SS13 changelogs
         
         Use this to post the active changelogs in the current channel.
+
+        - Today: Date of the changelog you want to get. in YYYY-mm-d format. (defaults to today)
         """
         if ctx.invoked_subcommand is None:
-            await self._send_cl_embed(ctx, None)
+            await self._send_cl_embed(ctx, channel=None, day=today)
 
     @schangelog.command()
     @checks.admin_or_permissions(administrator=True)
@@ -110,7 +133,7 @@ class SChangelog(BaseCog):
         This command is supposed to be used in tandem with a command scheduler cog like https://github.com/bobloy/Fox-V3 's fifo in order to create an automatic changelogs channel.
         make sure that you set the auto changelogs to a time before they get compiled in the repo or this command will be useless!
         """
-        await self._send_cl_embed(ctx, channel)
+        await self._send_cl_embed(ctx, channel=channel, day=date.today().strftime("%Y-%m-%d"))
 
     @schangelog.group(invoke_without_command=True)
     @checks.admin_or_permissions(administrator=True)

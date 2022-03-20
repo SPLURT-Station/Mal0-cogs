@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# VSCode run data
+.vscode/launch.json
+
+# Backup Stuff
+*.ffs_db
