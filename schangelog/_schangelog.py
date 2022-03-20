@@ -113,7 +113,7 @@ class SChangelog(BaseCog):
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
-    async def schangelog(self, ctx, *, today = date.today().strftime("%Y-%m-%d")):
+    async def schangelog(self, ctx, *, today: Optional[str]):
         """
         SS13 changelogs
         
@@ -122,6 +122,8 @@ class SChangelog(BaseCog):
         - Today: Date of the changelog you want to get. in YYYY-mm-d format. (defaults to today)
         """
         if ctx.invoked_subcommand is None:
+            if not today:
+                today = date.today().strftime("%Y-%m-%d")
             await self._send_cl_embed(ctx, channel=None, day=today)
 
     @schangelog.command()
