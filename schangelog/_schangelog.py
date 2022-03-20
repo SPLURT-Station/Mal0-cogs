@@ -89,7 +89,7 @@ class SChangelog(BaseCog):
 
         embed = discord.Embed(
             title=embedTitle,
-            description=f"There are currently **{numCh}** active changelogs." + nullCl,
+            description=f"There were **{numCh}** active changelogs." + nullCl,
             color=discord.Colour.from_rgb(*eColor),
             timestamp=datetime.utcnow()
         )
