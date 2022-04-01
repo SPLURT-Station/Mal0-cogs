@@ -136,14 +136,16 @@ class SChangelog(BaseCog):
 
     @schangelog.command()
     @checks.admin_or_permissions(administrator=True)
-    async def channel(self, ctx: commands.Context, *, channel: discord.TextChannel):
+    async def channel(self, ctx: commands.Context, channel: discord.TextChannel, *, today: Optional[str]):
         """
         Send the changelogs to a certain specific channel
 
         This command is supposed to be used in tandem with a command scheduler cog like https://github.com/bobloy/Fox-V3 's fifo in order to create an automatic changelogs channel.
         make sure that you set the auto changelogs to a time before they get compiled in the repo or this command will be useless!
         """
-        await self._send_cl_embed(ctx, channel=channel, day=date.today().strftime("%Y-%m-%d"))
+        if not today:
+            today = date.today().strftime("%Y-%m-%d")
+        await self._send_cl_embed(ctx, channel=channel, day=today)
 
     @schangelog.group(invoke_without_command=True)
     @checks.admin_or_permissions(administrator=True)
