@@ -110,6 +110,10 @@ class SChangelog(BaseCog):
             for t, c in v.items():
                 cont += "\n" + t + ": "
                 for i in c:
+                    if len(cont + "\n  - " + i) > (1024-6):
+                        embed.add_field(name=author, value=chat_formatting.box(cont.strip(), "yaml"), inline=False)
+                        cont = "\n" + t + ": "
+                        author = "\u200b"
                     cont += "\n  - " + i
             embed.add_field(name=author, value=chat_formatting.box(cont.strip(), "yaml"), inline=False)
         
