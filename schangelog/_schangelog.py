@@ -26,7 +26,6 @@ class SChangelog(BaseCog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=908039527271104513, force_registration=True)
-        self.timer = None
 
         default_guild = {
             "instancerepo": None,
