@@ -59,19 +59,17 @@ class CkeyTools(BaseCog):
 
     @ckeytools.command()
     @checks.admin()
-    async def forcestay(self, ctx: commands.Context, True_or_False: Optional[bool]):
+    async def forcestay(self, ctx: commands.Context, *, True_or_False: Optional[bool]):
         """
         Turn on/off to deverify players who leave the discord server.
 
         Saves the context in which it was turned on to perform automatic actions.
         """
         current = self.config.guild(ctx.guild).forcestay_enabled()
-        if not True_or_False:
-            current = not current
-        else:
-            current = True_or_False
-
-        if current:
+        if True_or_false is None:
+            return await ctx.send(f"This option is currently set to {current}")
+        
+        if True_or_false:
             await ctx.send("Players will now be required to stay in the discord server to play.")
             await self.config.guild(ctx.guild).saved_ctx.set(ctx)
         else:
