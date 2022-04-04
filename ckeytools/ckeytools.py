@@ -58,7 +58,7 @@ class CkeyTools(BaseCog):
     
 
     @ckeytools.command()
-    @checks.is_admin_or_superior()
+    @checks.admin()
     async def forcestay(self, ctx: commands.Context, True_or_False: Optional[bool]):
         """
         Turn on/off to deverify players who leave the discord server.
