@@ -66,10 +66,10 @@ class CkeyTools(BaseCog):
         Saves the context in which it was turned on to perform automatic actions.
         """
         current = self.config.guild(ctx.guild).forcestay_enabled()
-        if True_or_false is None:
+        if True_or_False is None:
             return await ctx.send(f"This option is currently set to {current}")
         
-        if True_or_false:
+        if True_or_False:
             await ctx.send("Players will now be required to stay in the discord server to play.")
             await self.config.guild(ctx.guild).saved_ctx.set(ctx)
         else:
