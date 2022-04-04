@@ -41,15 +41,15 @@ class CkeyTools(BaseCog):
         guild = member.guild
         if guild is None:
             return
-        enabled = self.config.guild(guild).forcestay_enabled()
-        prefix = self.get_tgdb_prefix(guild)
+        enabled = await self.config.guild(guild).forcestay_enabled()
+        prefix = await self.get_tgdb_prefix(guild)
 
         if not (enabled == "on"):
             return
         
         query = f"UPDATE {prefix}discord_links SET valid = FALSE WHERE discord_id = %s AND valid = TRUE"
         parameters = [member.id]
-        results = self.query_database(query, parameters)
+        results = await self.query_database(query, parameters)
 
     #Commands
     @commands.group()
@@ -69,7 +69,7 @@ class CkeyTools(BaseCog):
 
         Saves the context in which it was turned on to perform automatic actions.
         """
-        current = self.config.guild(ctx.guild).forcestay_enabled()
+        current = await self.config.guild(ctx.guild).forcestay_enabled()
         if on_or_off is None:
             return await ctx.send(f"This option is currently set to {current}")
         
@@ -81,19 +81,19 @@ class CkeyTools(BaseCog):
             await ctx.send("Players will no longer be required to stay in the discord server to play.")
         else:
             return await ctx.send(f"This option is currently set to {current}")
-        self.config.guild(ctx.guild).forcestay_enabled.set(on_or_off)
+        await self.config.guild(ctx.guild).forcestay_enabled.set(on_or_off)
     
     @ckeytools.command(name="devgone")
     async def mass_deverify_nonmembers(self, ctx: commands.Context):
         """
         Deverify all the linked ckeys not currently in the discord server.
         """
-        enabled = self.config.guild(ctx.guild).forcestay_enabled()
+        enabled = await self.config.guild(ctx.guild).forcestay_enabled()
         if not (enabled == "on"):
             return await ctx.send("The requirement to stay in the discord is currently not enabled.")
         
         tgdb = self.get_tgdb()
-        prefix = self.get_tgdb_prefix(ctx.guild)
+        prefix = await self.get_tgdb_prefix(ctx.guild)
 
         deleted = 0
 
