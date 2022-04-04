@@ -81,6 +81,9 @@ class CkeyTools(BaseCog):
     
     @ckeytools.command(name="devgone")
     async def mass_deverify_nonmembers(self, ctx: commands.Context):
+        """
+        Deverify all the linked ckeys not currently in the discord server.
+        """
         enabled = self.config.guild(ctx.guild).forcestay_enabled()
         if not enabled:
             return await ctx.send("The requirement to stay in the discord is currently not enabled.")
