@@ -1,4 +1,6 @@
 #General imports
+import logging
+import aiomysql
 from typing import Optional
 
 #discord imports
@@ -10,6 +12,8 @@ from tgcommon.models import DiscordLink
 
 #Redbot imports
 from redbot.core import commands, Config, checks
+
+log = logging.getLogger("red.oranges_tgdb")
 
 BaseCog = getattr(commands, "Cog", object)
 
@@ -26,8 +30,7 @@ class CkeyTools(BaseCog):
         self.config = Config.get_conf(self, identifier=908039527271104513, force_registration=True)
 
         default_guild = {
-            "forcestay_enabled": False,
-            "saved_ctx": None
+            "forcestay_enabled": "off"
         }
         
         self.config.register_guild(**default_guild)
@@ -38,14 +41,15 @@ class CkeyTools(BaseCog):
         guild = member.guild
         if guild is None:
             return
-        ctx = self.config.guild(guild).saved_ctx()
         enabled = self.config.guild(guild).forcestay_enabled()
-        tgdb = self.get_tgdb()
+        prefix = self.get_tgdb_prefix(guild)
 
-        if (not enabled) or (not tgdb):
+        if not (enabled == "on"):
             return
         
-        await tgdb.clear_all_valid_discord_links_for_discord_id(ctx, member.id)
+        query = f"UPDATE {prefix}discord_links SET valid = FALSE WHERE discord_id = %s AND valid = TRUE"
+        parameters = [member.id]
+        results = self.query_database(query, parameters)
 
     #Commands
     @commands.group()
@@ -59,22 +63,24 @@ class CkeyTools(BaseCog):
 
     @ckeytools.command()
     @checks.admin()
-    async def forcestay(self, ctx: commands.Context, *, True_or_False: Optional[bool]):
+    async def forcestay(self, ctx: commands.Context, *, on_or_off: Optional[str]):
         """
         Turn on/off to deverify players who leave the discord server.
 
         Saves the context in which it was turned on to perform automatic actions.
         """
         current = self.config.guild(ctx.guild).forcestay_enabled()
-        if True_or_False is None:
+        if on_or_off is None:
             return await ctx.send(f"This option is currently set to {current}")
         
-        if True_or_False:
+        on_or_off = on_or_off.lower()
+        
+        if on_or_off == "on":
             await ctx.send("Players will now be required to stay in the discord server to play.")
-            await self.config.guild(ctx.guild).saved_ctx.set(ctx)
-        else:
+        elif on_or_off == "off":
             await ctx.send("Players will no longer be required to stay in the discord server to play.")
-            await self.config.guild(ctx.guild).saved_ctx.set(None)
+        else:
+            return await ctx.send(f"This option is currently set to {current}")
         self.config.guild(ctx.guild).forcestay_enabled.set(current)
     
     @ckeytools.command(name="devgone")
@@ -83,7 +89,7 @@ class CkeyTools(BaseCog):
         Deverify all the linked ckeys not currently in the discord server.
         """
         enabled = self.config.guild(ctx.guild).forcestay_enabled()
-        if not enabled:
+        if not (enabled == "on"):
             return await ctx.send("The requirement to stay in the discord is currently not enabled.")
         
         tgdb = self.get_tgdb()
@@ -106,7 +112,8 @@ class CkeyTools(BaseCog):
         Gets the prefix for the database linked to tgdb
         """
         tgdb = self.get_tgdb()
-        return await tgdb.config.guild(guild).mysql_prefix()
+        prefix = await tgdb.config.guild(guild).mysql_prefix()
+        return prefix
 
     def get_tgdb(self):
         """
@@ -129,3 +136,23 @@ class CkeyTools(BaseCog):
                 "TGVerify must exist and be configured for ckeytools to work"
             )
         return tgver
+    
+    #Miscellaneous functions
+    async def query_database(self, query, parameters):
+        """
+        Use TGDB's active pool to access the database
+        """
+        tgdb = self.get_tgdb()
+        pool = tgdb.pool
+        if not pool:
+            raise TGUnrecoverableError(
+                "The database was not connected. Please reconnect it using [p]tgdb reconnect"
+            )
+        log.debug(f"Executing query {query}, with parameters {parameters}")
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, parameters)
+                rows = cur.fetchall()
+                # WRITE TO STORAGE LOL
+                await conn.commit()
+                return rows.result()
