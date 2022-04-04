@@ -81,7 +81,7 @@ class CkeyTools(BaseCog):
             await ctx.send("Players will no longer be required to stay in the discord server to play.")
         else:
             return await ctx.send(f"This option is currently set to {current}")
-        self.config.guild(ctx.guild).forcestay_enabled.set(current)
+        self.config.guild(ctx.guild).forcestay_enabled.set(on_or_off)
     
     @ckeytools.command(name="devgone")
     async def mass_deverify_nonmembers(self, ctx: commands.Context):
