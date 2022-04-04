@@ -103,7 +103,7 @@ class CkeyTools(BaseCog):
             rawsults = await tgdb.query_database(ctx, query, parameters)
             results = [DiscordLink.from_db_record(raw) for raw in rawsults]
             for result in results:
-                member_check = await ctx.guild.get_member(result.discord_id)
+                member_check = ctx.guild.get_member(result.discord_id)
                 if not member_check:
                     deleted += 1
                     await tgdb.clear_all_valid_discord_links_for_discord_id(ctx, result.discord_id)
