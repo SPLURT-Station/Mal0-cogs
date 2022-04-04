@@ -95,6 +95,8 @@ class CkeyTools(BaseCog):
         tgdb = self.get_tgdb()
         prefix = self.get_tgdb_prefix(ctx.guild)
 
+        deleted = 0
+
         async with ctx.typing():
             query = f"SELECT * FROM {prefix}discord_links WHERE discord_id IS NOT NULL AND valid = TRUE"
             parameters = []
@@ -103,8 +105,10 @@ class CkeyTools(BaseCog):
             for result in results:
                 member_check = await ctx.guild.get_member(result.discord_id)
                 if not member_check:
+                    deleted += 1
                     await tgdb.clear_all_valid_discord_links_for_discord_id(ctx, result.discord_id)
         
+        return await ctx.send(f"**{deleted}** users have been deverified.")
 
     #Functions to get cogs and info from the cogs
     async def get_tgdb_prefix(self, guild):
