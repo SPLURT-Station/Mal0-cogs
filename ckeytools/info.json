@@ -1,0 +1,23 @@
+{
+    "author": [
+        "Mosley"
+    ],
+    "description": "Add better integration functionalities for the tgdb/tgverify cogs by oranges",
+    "install_msg": "Thanks to oranges for making both the tgdb/tgverify cogs. Reminder that this cog is made to work alongside these two, so in order to use it you must have both installed and set up",
+    "short": "plugins for tgdb/tgverify",
+    "requirements": [
+        "tgcommon",
+        "aiomysql"
+    ],
+    "required_cogs": {
+        "tgdb": "https://github.com/optimumtact/orangescogs",
+        "tgverify": "https://github.com/optimumtact/orangescogs"
+    },
+    "tags": [
+        "Space Station 13",
+        "SS13",
+        "Game",
+        "Changelogs",
+        "Utility"
+    ]
+}

@@ -44,13 +44,3 @@ def createChanges(cl, dateOverride):
             else:
                 changes[author].update({ch[0] : [ch[1]]})
     return changes, numCh
-
-def main():
-    when = ""
-    how = False
-    if len(when):
-        how = True
-    print(when, len(when), how)
-
-if __name__ == "__main__":
-    main()
