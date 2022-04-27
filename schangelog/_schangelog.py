@@ -57,8 +57,10 @@ class SChangelog(BaseCog):
         if not channel:
             channel = ctx.channel
             role = None
-        
-        daydate = datetime.strptime(day, "%Y-%m-%d")
+        try:
+            daydate = datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            return await channel.send("That's not a valid date, dummy")
         
         if day == now.strftime("%Y-%m-%d"):
             embedTitle = "Currently active changelogs"
@@ -83,8 +85,6 @@ class SChangelog(BaseCog):
 
         try:
             (changes, numCh) = readCl(instance, day)
-        except ValueError:
-            return await channel.send("That's not a valid date, dummy")
         except AttributeError:
             nullCl = "\nSeems like nothing happened on this day"
         except RepoError as e:
