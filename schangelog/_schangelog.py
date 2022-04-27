@@ -1,7 +1,9 @@
 #General imports
-import os, random, validators
+import os, random, validators, requests
 from datetime import date, datetime
 from typing import Optional
+from shutil import rmtree
+from urllib.error import HTTPError
 
 #Discord imports
 import discord
@@ -21,7 +23,7 @@ class SChangelog(BaseCog):
     """
 
     __author__ = "Mosley"
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"
 
     def __init__(self, bot):
         self.bot = bot
@@ -51,36 +53,50 @@ class SChangelog(BaseCog):
         numCh = 0
         nullCl = ""
         message = ""
+        fallback = False
 
         if not channel:
             channel = ctx.channel
             role = None
+        try:
+            daydate = datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            return await channel.send("That's not a valid date, dummy")
         
         if day == now.strftime("%Y-%m-%d"):
             embedTitle = "Currently active changelogs"
         else:
             try:
-                embedTitle = datetime.strptime(day, "%Y-%m-%d")
-                embedTitle = embedTitle.strftime("%d/%m/%Y")
+                embedTitle = daydate.strftime("%d/%m/%Y")
             except:
                 embedTitle = "Error"
 
+        try:
+            await self._download_cl_from_repo(ctx, daydate)
+            instance = os.path.join(os.getcwd(), "temp")
+        except:
+            await ctx.send("Error while fetching from github link! Using fallback local repo.")
+            fallback = True
         
-        if not instance:
+        if not instance and fallback:
             return await channel.send("There is no configured repo yet!")
 
         if role:
             message = f"{role.mention}"
+
         try:
             (changes, numCh) = readCl(instance, day)
-        except ValueError:
-            return await channel.send("That's not a valid date, dummy")
         except AttributeError:
             nullCl = "\nSeems like nothing happened on this day"
         except RepoError as e:
             return await channel.send(str(e))
         except Exception as e:
             raise e
+        
+        try:
+            rmtree(os.path.join(os.getcwd(), "temp"))
+        except:
+            pass
 
         if numCh < 1:
             message = ""
@@ -117,6 +133,19 @@ class SChangelog(BaseCog):
             embed.add_field(name=author, value=chat_formatting.box(cont.strip(), "yaml"), inline=False)
         
         await channel.send(message, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
+    
+    async def _download_cl_from_repo(self, ctx: commands.Context, day: datetime):
+        gitlink = await self.config.guild(ctx.guild).gitlink()
+        rawlink = gitlink.replace("github.com", "raw.githubusercontent.com")
+        rawlink += "/master/html/changelogs/archive/{yearmonth}.yml".format(yearmonth=day.strftime("%Y-%m"))
+        archivedir = os.path.join(os.getcwd(), "temp/Repository/html/changelogs/archive")
+        filedir = os.path.join(archivedir, day.strftime("%Y-%m") + ".yml")
+        os.makedirs(archivedir, exist_ok=True)
+        changelog = requests.get(rawlink)
+        if changelog.text == "404: Not Found":
+            raise HTTPError(rawlink, 404, "Not Found")
+        with open(filedir, "w", encoding="utf-8") as monthfile:
+            monthfile.write(changelog.text)
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
@@ -174,7 +203,10 @@ Current config:
     @checks.is_owner()
     async def repository(self, ctx: commands.Context, *, new_repo: Optional[str]):
         """
-        Change the Changelog Repository
+        Change the fallback changelog repository.
+
+        Use this to save the path to your local server instance if you're running it in the same machine. 
+        This is ONLY supposed to be used as a fallback if it fails to fetch from the link.
         """
         guild = ctx.guild
         if not new_repo:
@@ -197,7 +229,9 @@ Current config:
     @set.command(name="link")
     async def set_gitlink(self, ctx: commands.Context, *, newLink: Optional[str]):
         """
-        Change the link that clicking on the changelog's author will direct to
+        Change the link where the changelogs come from.
+        
+        Changelog files will be downloaded from here. Clicking on the embed's author will take you to this link as well.
         """
 
         if not newLink:
