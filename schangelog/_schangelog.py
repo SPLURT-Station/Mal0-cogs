@@ -142,7 +142,7 @@ class SChangelog(BaseCog):
         os.makedirs(archivedir, exist_ok=True)
         changelog = requests.get(rawlink)
         with open(filedir, "w", encoding="utf-8") as monthfile:
-            monthfile.write(changelog.content)
+            monthfile.write(changelog.text)
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
