@@ -52,6 +52,7 @@ class SChangelog(BaseCog):
         numCh = 0
         nullCl = ""
         message = ""
+        fallback = False
 
         if not channel:
             channel = ctx.channel
@@ -72,9 +73,9 @@ class SChangelog(BaseCog):
             instance = os.path.join(os.getcwd(), "temp")
         except:
             await ctx.send("Error while fetching from github link! Using fallback local repo.")
-            gitlink = None
+            fallback = True
         
-        if not instance and not gitlink:
+        if not instance and fallback:
             return await channel.send("There is no configured repo yet!")
 
         if role:
