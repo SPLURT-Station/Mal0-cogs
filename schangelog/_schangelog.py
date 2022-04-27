@@ -3,6 +3,7 @@ import os, random, validators, requests
 from datetime import date, datetime
 from typing import Optional
 from shutil import rmtree
+from urllib.error import HTTPError
 
 #Discord imports
 import discord
@@ -141,6 +142,8 @@ class SChangelog(BaseCog):
         filedir = os.path.join(archivedir, day.strftime("%Y-%m") + ".yml")
         os.makedirs(archivedir, exist_ok=True)
         changelog = requests.get(rawlink)
+        if changelog.text == "404: Not Found":
+            raise HTTPError(rawlink, 404, "Not Found")
         with open(filedir, "w", encoding="utf-8") as monthfile:
             monthfile.write(changelog.text)
 
