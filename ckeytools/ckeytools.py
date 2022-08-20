@@ -26,7 +26,7 @@ class CkeyTools(BaseCog):
     """
     
     __author__ = "Mosley"
-    __version__ = "1.0.0"
+    __version__ = "2.0.0"
     
     def __init__(self, bot):
         self.bot = bot
