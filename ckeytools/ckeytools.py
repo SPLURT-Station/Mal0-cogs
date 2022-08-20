@@ -245,7 +245,7 @@ class CkeyTools(BaseCog):
         
         embed = discord.Embed(
             title="Current donator roles:",
-            timestamp=datetime.utcnow()
+            timestamp=datetime.datetime.utcnow()
         )
         firststring = "\n".join(["- {}: {}".format(k, v) for k, v in firstdict.items()])
         secondstring = "\n".join(["- {}: {}".format(k, v) for k, v in seconddict.items()])
