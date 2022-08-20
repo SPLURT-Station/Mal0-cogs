@@ -353,7 +353,8 @@ tier_3 = [{tier3}]
         ckeys = []
         for member in role.members:
             link: DiscordLink = await self.link_from_member(member)
-            ckeys.append(link.ckey)
+            if(not link is None):
+                ckeys.append(link.ckey)
         return ckeys
     
     async def link_from_member(self, member: discord.Member):
