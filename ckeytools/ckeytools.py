@@ -352,7 +352,7 @@ tier_3 = [{tier3}]
         """
         ckeys = []
         for member in role.members:
-            link: DiscordLink = self.link_from_member(member)
+            link: DiscordLink = await self.link_from_member(member)
             ckeys.append(link.ckey)
         return ckeys
     
