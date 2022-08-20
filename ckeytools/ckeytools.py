@@ -181,9 +181,9 @@ class CkeyTools(BaseCog):
         on_or_off = on_or_off.lower()
         
         if on_or_off == "on":
-            await ctx.send("Donators will be updated whenever user's")
+            await ctx.send("Donators will be updated whenever users are updated.")
         elif on_or_off == "off":
-            await ctx.send("Players will no longer be required to stay in the discord server to play.")
+            await ctx.send("Donators will no longer be automatically updated.")
         else:
             return await ctx.send(f"This option is currently set to {current}")
         await self.config.guild(ctx.guild).autodonator_enabled.set(on_or_off)
