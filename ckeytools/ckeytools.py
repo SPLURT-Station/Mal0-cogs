@@ -363,7 +363,7 @@ tier_3 = [{tier3}]
         """
         prefix = await self.get_tgdb_prefix(member.guild)
         query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s AND ckey IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
-        parameters = [member.id]
+        parameters = [member._user.id]
         results = await self.query_database(query, parameters)
         if len(results):
             return DiscordLink.from_db_record(results[0])
