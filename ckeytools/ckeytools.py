@@ -155,8 +155,8 @@ class CkeyTools(BaseCog):
         """
         pass
     
-    @config.command(name="instance")
-    async def set_instance(self, ctx: commands.Context, *, new_repo: str):
+    @config.command(name="folder")
+    async def set_folder(self, ctx: commands.Context, *, new_repo: str):
         """
         Set the folder of the instance to set donator info in
         
