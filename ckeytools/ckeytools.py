@@ -130,7 +130,7 @@ class CkeyTools(BaseCog):
 
     #autodonator Commands
     @commands.group()
-    @checks.is_admin_or_superior()
+    @checks.admin()
     async def autodonator(self, ctx: commands.Context):
         """
         Commands for the automatic management of donator roles and perks in-game
