@@ -282,8 +282,6 @@ class CkeyTools(BaseCog):
                 tier2 += keys
             if(tier == "third"):
                 tier3 += keys
-        tier1 += tier2 + tier3
-        tier2 += tier3
         
         with open(folder, mode="w") as donatorfile:
             new_text ="""
