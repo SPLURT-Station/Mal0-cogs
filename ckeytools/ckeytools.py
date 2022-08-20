@@ -160,7 +160,7 @@ class CkeyTools(BaseCog):
         """
         Set the folder of the instance to set donator info in
         
-        Please select the FULL PATH where you want to send the TOML file to
+        Please select the __FULL PATH__ of the __FOLDER__ where you want to send the TOML file to
         """
         new_repo = os.path.abspath(new_repo)
         if not os.path.exists(new_repo):
