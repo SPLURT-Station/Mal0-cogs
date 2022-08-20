@@ -163,8 +163,8 @@ class CkeyTools(BaseCog):
         Please select the __FULL PATH__ of the __FOLDER__ where you want to send the TOML file to
         """
         new_repo = os.path.abspath(new_repo)
-        if not os.path.exists(new_repo):
-            return await ctx.send("This path does not exist!")
+        if not (os.path.exists(new_repo) and os.path.isdir(new_repo)):
+            return await ctx.send("This path is not a valid folder!")
         
         await self.config.guild(ctx.guild).config_folder.set(new_repo)
         await ctx.tick()
