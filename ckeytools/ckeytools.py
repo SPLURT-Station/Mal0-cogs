@@ -146,6 +146,7 @@ class CkeyTools(BaseCog):
         Manually create a new donator tier toml file
         """
         await self.rebuild_donator_file(ctx.guild)
+        await ctx.tick()
     
     @autodonator.group()
     async def config(self, ctx: commands.Context):
