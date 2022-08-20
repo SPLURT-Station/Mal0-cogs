@@ -7,7 +7,8 @@
     "short": "plugins for tgdb/tgverify",
     "requirements": [
         "tgcommon",
-        "aiomysql"
+        "aiomysql",
+        "tomlkit"
     ],
     "required_cogs": {
         "tgdb": "https://github.com/optimumtact/orangescogs",
