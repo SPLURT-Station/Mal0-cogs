@@ -284,13 +284,15 @@ class CkeyTools(BaseCog):
         tier2 += tier3
         
         with open(folder, mode="w") as donatorfile:
-            new_text =f"""
+            new_text ="""
 [donators]
-tier_1 = [{", ".join(["\"{}\"".format(c) for c in tier1])}]
-tier_2 = [{", ".join(["\"{}\"".format(c) for c in tier2])}]
-tier_3 = [{", ".join(["\"{}\"".format(c) for c in tier3])}]
+tier_1 = [{tier1}]
+tier_2 = [{tier2}]
+tier_3 = [{tier3}]
 
-"""
+""".format(tier1=", ".join(["\"{}\"".format(c) for c in tier1]), \
+    tier2=", ".join(["\"{}\"".format(c) for c in tier2]), \
+    tier3=", ".join(["\"{}\"".format(c) for c in tier3]))
             donatorfile.write(tomlkit.dumps(tomlkit.loads(new_text)))
     
     #Functions to get cogs and info from the cogs
