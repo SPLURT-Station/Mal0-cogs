@@ -363,8 +363,14 @@ tier_3 = [{tier3}]
         prefix = await self.get_tgdb_prefix(member.guild)
         query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s AND ckey IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
         parameters = [member.id]
-        results = await self.query_database(query, parameters)
-        if len(results):
-            return DiscordLink.from_db_record(results[0])
+        try:
+            results = await self.query_database(query, parameters)
+            if len(results):
+                return DiscordLink.from_db_record(results[0])
+        except TGUnrecoverableError:
+            tgdb = self.get_tgdb()
+            context = commands.Context()
+            context.guild = member.guild
+            await tgdb.reconnect_to_db_with_guild_context_config(context)
 
         return None
