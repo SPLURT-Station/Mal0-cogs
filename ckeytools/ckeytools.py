@@ -368,10 +368,6 @@ tier_3 = [{tier3}]
             if len(results):
                 return DiscordLink.from_db_record(results[0])
         except TGUnrecoverableError:
-            tgdb = self.get_tgdb()
-            context = commands.Context()
-            context.guild = member.guild
-            context.prefix = ">>"
-            await tgdb.reconnect_to_db_with_guild_context_config(context)
+            return None
 
         return None
