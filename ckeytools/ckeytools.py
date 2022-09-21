@@ -26,7 +26,7 @@ class CkeyTools(BaseCog):
     """
     
     __author__ = "Mosley"
-    __version__ = "2.0.0"
+    __version__ = "2.0.1"
     
     def __init__(self, bot):
         self.bot = bot
@@ -275,7 +275,10 @@ class CkeyTools(BaseCog):
         
         for role in roles:
             tier = await self.config.role(role).donator_tier()
-            keys = await self.get_ckeys_from_role(role)
+            try:
+                keys = await self.get_ckeys_from_role(role)
+            except TGUnrecoverableError as exception:
+                return
             if(tier == "first"):
                 tier1 += keys
             if(tier == "second"):
@@ -363,11 +366,8 @@ tier_3 = [{tier3}]
         prefix = await self.get_tgdb_prefix(member.guild)
         query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s AND ckey IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
         parameters = [member.id]
-        try:
-            results = await self.query_database(query, parameters)
-            if len(results):
-                return DiscordLink.from_db_record(results[0])
-        except TGUnrecoverableError:
-            return None
+        results = await self.query_database(query, parameters)
+        if len(results):
+            return DiscordLink.from_db_record(results[0])
 
         return None
