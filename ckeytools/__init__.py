@@ -1,4 +1,4 @@
 from .ckeytools import CkeyTools
 
-def setup(bot):
-    bot.add_cog(CkeyTools(bot))
+async def setup(bot):
+    await bot.add_cog(CkeyTools(bot))
