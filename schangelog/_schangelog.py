@@ -113,7 +113,7 @@ class SChangelog(BaseCog):
             timestamp=datetime.utcnow()
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
-        embed.set_footer(text=footer, icon_url=ctx.me.avatar_url)
+        embed.set_footer(text=footer, icon_url=ctx.me.avatar)
         embed.set_thumbnail(url=guildpic)
 
         if len(nullCl):
