@@ -110,7 +110,7 @@ class SChangelog(BaseCog):
             title=embedTitle,
             description=f"There were **{numCh}** active changelogs." + nullCl,
             color=discord.Colour.from_rgb(*eColor),
-            timestamp=datetime.utcnow()
+            timestamp=discord.utils.utcnow(),
         )
         embed.set_author(name=f"{guild.name}'s Changelogs", url=gitlink, icon_url=guildpic)
         embed.set_footer(text=footer, icon_url=ctx.me.avatar)
