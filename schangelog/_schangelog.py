@@ -43,7 +43,7 @@ class SChangelog(BaseCog):
     async def _send_cl_embed(self, ctx: commands.Context, channel: Optional[discord.TextChannel], day: Optional[str]):
         now = date.today()
         guild = ctx.guild
-        guildpic = guild.icon_url
+        guildpic = guild.icon
         instance = await self.config.guild(guild).instancerepo()
         footers = await self.config.guild(guild).footer_lines()
         gitlink = await self.config.guild(guild).gitlink()
