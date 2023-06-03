@@ -161,8 +161,7 @@ class CkeyTools(BaseCog):
         
         with open(folder, "r") as donator_file:
             await ctx.send(chat_formatting.box(donator_file.read(), "toml"))
-            
-    
+
     @autodonator.group()
     async def config(self, ctx: commands.Context):
         """
