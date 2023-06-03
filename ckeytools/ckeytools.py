@@ -287,15 +287,14 @@ class CkeyTools(BaseCog):
                 tier3 += keys
         
         with open(folder, mode="w") as donatorfile:
-            new_text ="""
-[donators]
-tier_1 = [{tier1}]
-tier_2 = [{tier2}]
-tier_3 = [{tier3}]
-""".format(tier1=", ".join(["\"{}\"".format(c) for c in tier1]), \
-    tier2=", ".join(["\"{}\"".format(c) for c in tier2]), \
-    tier3=", ".join(["\"{}\"".format(c) for c in tier3]))
-            donatorfile.write(tomlkit.dumps(tomlkit.loads(new_text.strip() + "\n")))
+            new_info = {
+                "donators": {
+                    "tier_1": tier1,
+                    "tier_2": tier2,
+                    "tier_3": tier3
+                }
+                    }
+            donatorfile.write(tomlkit.dumps(new_info))
     
     #Functions to get cogs and info from the cogs
     async def get_tgdb_prefix(self, guild):
