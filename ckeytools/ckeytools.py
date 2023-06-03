@@ -160,7 +160,8 @@ class CkeyTools(BaseCog):
         folder = os.path.abspath(os.path.join(folder, "donator.toml"))
         
         with open(folder, "r") as donator_file:
-            ctx.send(chat_formatting.box(donator_file.read(), "toml"))
+            await ctx.send(chat_formatting.box(donator_file.read(), "toml"))
+            
     
     @autodonator.group()
     async def config(self, ctx: commands.Context):
