@@ -148,7 +148,7 @@ class CkeyTools(BaseCog):
         await self.rebuild_donator_file(ctx.guild)
         await ctx.tick()
     
-    @autodonator.command()
+    @autodonator.command("check")
     async def check_file(self, ctx: commands.Context):
         """
         Debug command. Prints the current donator file.
