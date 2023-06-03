@@ -148,6 +148,20 @@ class CkeyTools(BaseCog):
         await self.rebuild_donator_file(ctx.guild)
         await ctx.tick()
     
+    @autodonator.command("check")
+    async def check_file(self, ctx: commands.Context):
+        """
+        Debug command. Prints the current donator file.
+        """
+        
+        folder = await self.config.guild(ctx.guild).config_folder()
+        if(folder is None):
+            folder = os.path.abspath(os.getcwd())
+        folder = os.path.abspath(os.path.join(folder, "donator.toml"))
+        
+        with open(folder, "r") as donator_file:
+            await ctx.send(chat_formatting.box(donator_file.read(), "toml"))
+
     @autodonator.group()
     async def config(self, ctx: commands.Context):
         """
@@ -287,15 +301,14 @@ class CkeyTools(BaseCog):
                 tier3 += keys
         
         with open(folder, mode="w") as donatorfile:
-            new_text ="""
-[donators]
-tier_1 = [{tier1}]
-tier_2 = [{tier2}]
-tier_3 = [{tier3}]
-""".format(tier1=", ".join(["\"{}\"".format(c) for c in tier1]), \
-    tier2=", ".join(["\"{}\"".format(c) for c in tier2]), \
-    tier3=", ".join(["\"{}\"".format(c) for c in tier3]))
-            donatorfile.write(tomlkit.dumps(tomlkit.loads(new_text.strip() + "\n")))
+            new_info = {
+                "donators": {
+                    "tier_1": tier1,
+                    "tier_2": tier2,
+                    "tier_3": tier3
+                }
+                    }
+            donatorfile.write(tomlkit.dumps(new_info))
     
     #Functions to get cogs and info from the cogs
     async def get_tgdb_prefix(self, guild):

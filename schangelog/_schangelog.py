@@ -40,7 +40,7 @@ class SChangelog(BaseCog):
 
         self.config.register_guild(**default_guild)
 
-    async def _send_cl_embed(self, ctx: commands.Context, channel: Optional[discord.TextChannel], day: Optional[str]):
+    async def _send_cl_embed(self, ctx: commands.Context, ping_enabled: bool, day: Optional[str]):
         now = date.today()
         guild = ctx.guild
         guildpic = guild.icon
@@ -50,14 +50,15 @@ class SChangelog(BaseCog):
         eColor = await self.config.guild(guild).embed_color()
         role = await self.config.guild(guild).mentionrole()
         role = discord.utils.get(guild.roles, id=role)
+        channel = ctx.channel
         numCh = 0
         nullCl = ""
         message = ""
         fallback = False
 
-        if not channel:
-            channel = ctx.channel
+        if not ping_enabled:
             role = None
+        
         try:
             daydate = datetime.strptime(day, "%Y-%m-%d")
         except ValueError:
@@ -75,7 +76,8 @@ class SChangelog(BaseCog):
             await self._download_cl_from_repo(ctx, daydate)
             instance = os.path.join(os.getcwd(), "temp")
         except:
-            await ctx.send("Error while fetching from github link! Using fallback local repo.")
+            if not role:
+                await ctx.send("Error while fetching from github link! Using fallback local repo.")
             fallback = True
         
         if not instance and fallback:
@@ -149,31 +151,19 @@ class SChangelog(BaseCog):
 
     @commands.guild_only()
     @commands.group(invoke_without_command=True, aliases=["scl"])
-    async def schangelog(self, ctx, *, today: Optional[str]):
+    async def schangelog(self, ctx, ping: Optional[bool], *, today: Optional[str],):
         """
         SS13 changelogs
         
         Use this to post the active changelogs in the current channel.
 
+        - ping: pings the saved role with the message if true
         - Today: Date of the changelog you want to get. in YYYY-mm-d format. (defaults to today)
         """
         if ctx.invoked_subcommand is None:
             if not today:
                 today = date.today().strftime("%Y-%m-%d")
-            await self._send_cl_embed(ctx, channel=None, day=today)
-
-    @schangelog.command()
-    @checks.admin_or_permissions(administrator=True)
-    async def channel(self, ctx: commands.Context, channel: discord.TextChannel, *, today: Optional[str]):
-        """
-        Send the changelogs to a certain specific channel
-
-        This command is supposed to be used in tandem with a command scheduler cog like https://github.com/bobloy/Fox-V3 's fifo in order to create an automatic changelogs channel.
-        make sure that you set the auto changelogs to a time before they get compiled in the repo or this command will be useless!
-        """
-        if not today:
-            today = date.today().strftime("%Y-%m-%d")
-        await self._send_cl_embed(ctx, channel=channel, day=today)
+            await self._send_cl_embed(ctx, ping_enabled=ping, day=today)
 
     @schangelog.group(invoke_without_command=True)
     @checks.admin_or_permissions(administrator=True)
