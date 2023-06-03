@@ -3,7 +3,7 @@
         "Mosley"
     ],
     "description": "Post SS13 changelogs for a specific TGS instance.",
-    "install_msg": "Reminder that you must configure the path of the instance before using. The `channel` command is supposed to be used alongside a scheduler cog, so keep that in mind.",
+    "install_msg": "Reminder that you must configure the path of the instance and/or github link before using. The ping option works better when used with a scheduler cog",
     "short": "SS13 changelogs",
     "Name": "SS13 Changelogs",
     "requirements": [
