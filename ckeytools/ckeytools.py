@@ -148,6 +148,20 @@ class CkeyTools(BaseCog):
         await self.rebuild_donator_file(ctx.guild)
         await ctx.tick()
     
+    @autodonator.command()
+    async def check_file(self, ctx: commands.Context):
+        """
+        Debug command. Prints the current donator file.
+        """
+        
+        folder = await self.config.guild(ctx.guild).config_folder()
+        if(folder is None):
+            folder = os.path.abspath(os.getcwd())
+        folder = os.path.abspath(os.path.join(folder, "donator.toml"))
+        
+        with open(folder, "r") as donator_file:
+            ctx.send(chat_formatting.box(donator_file.read(), "toml"))
+    
     @autodonator.group()
     async def config(self, ctx: commands.Context):
         """
