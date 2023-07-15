@@ -239,7 +239,7 @@ class AutoJukebox(commands.Cog):
         """
         await self.config.guild(ctx.guild).suggest_id.set(channel.id)
         await ctx.tick()
-        await ctx.message.reply(f"Jukebox suggestions will now be sent to {channel.mention}")
+        await ctx.message.reply(f"Jukebox suggestions will now be posted in {channel.mention}")
     
     @setjukesuggest.command()
     async def modschannel(self, ctx: commands.Context, channel: discord.TextChannel):
