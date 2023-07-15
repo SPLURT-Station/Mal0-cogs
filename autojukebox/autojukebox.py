@@ -92,7 +92,7 @@ class AutoJukebox(commands.Cog):
             return await ctx.send(f"You must send an .ogg file.", delete_after=5)
         
         if attachment.size > max_song_size:
-            return await ctx.message.reply(f"Your file is too thicc! the max filesize is {max_song_size}mb.", delete_after=5)
+            return await ctx.message.reply(f"Your file is too thicc! the max filesize is {round(max_song_size / 1024**2, 2)}mb.", delete_after=5)
         
         async with ctx.typing():
             path_name = os.path.abspath(os.path.join(os.getcwd(), attachment.filename))
