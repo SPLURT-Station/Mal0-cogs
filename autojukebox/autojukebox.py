@@ -128,19 +128,19 @@ class AutoJukebox(commands.Cog):
         
         - suggestion: the number of the suggestion to approve
         """
-        suggest_id = await self.config.guild(ctx.guild).suggest_id()
+        mods_id = await self.config.guild(ctx.guild).mods_id()
         enabled = await self.config.guild(ctx.guild).toggle()
         jukebox_folder = await self.config.guild(ctx.guild).save_path()
         ffmpeg_folder = await self.config.guild(ctx.guild).ffmpeg_path()
         
         if not enabled:
             return await ctx.send("Jukebox suggestions aren't enabled.")
-        if not suggest_id:
+        if not mods_id:
             return await ctx.send("There's no suggestions channel.")
         if not jukebox_folder or not ffmpeg_folder:
             return await ctx.send("The jukebox path hasn't been configured.")
         
-        suggest_channel = discord.utils.get(ctx.guild.text_channels, id=suggest_id)
+        mods_channel = discord.utils.get(ctx.guild.text_channels, id=mods_id)
         jukebox_folder = os.path.abspath(jukebox_folder)
         
         msg_id = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).msg_id()
@@ -150,11 +150,11 @@ class AutoJukebox(commands.Cog):
         
         oldmsg: discord.Message
         try:
-            oldmsg = await suggest_channel.fetch_message(msg_id)
+            oldmsg = await mods_channel.fetch_message(msg_id)
         except discord.NotFound:
-            return await ctx.send("Uh oh, message with this ID doesn't exist.")
+            return await ctx.send(f"Uh oh, message with this ID {msg_id} doesn't exist.")
         if not oldmsg:
-            return await ctx.send("Uh oh, message with this ID doesn't exist.")
+            return await ctx.send(f"Uh oh, message with ID {msg_id} doesn't exist.")
         
         attachment = oldmsg.attachments[0]
         song_length = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).length()
@@ -180,15 +180,15 @@ class AutoJukebox(commands.Cog):
         
         - suggestion: the number of the jukebox suggestion to reject
         """
-        suggest_id = await self.config.guild(ctx.guild).suggest_id()
+        mods_id = await self.config.guild(ctx.guild).mods_id()
         enabled = await self.config.guild(ctx.guild).toggle()
 
         if not enabled:
             return await ctx.send("Jukebox suggestions aren't enabled.")
-        if not suggest_id:
+        if not mods_id:
             return await ctx.send("There's no suggestions channel.")
         
-        suggest_channel = discord.utils.get(ctx.guild.text_channels, id=suggest_id)
+        mods_channel = discord.utils.get(ctx.guild.text_channels, id=mods_id)
         msg_id = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).msg_id()
         if msg_id != 0:
             if await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished():
@@ -196,7 +196,7 @@ class AutoJukebox(commands.Cog):
             
         oldmsg: discord.Message
         try:
-            oldmsg = await suggest_channel.fetch_message(msg_id)
+            oldmsg = await mods_channel.fetch_message(msg_id)
         except discord.NotFound:
             return await ctx.send("Uh oh, message with this ID doesn't exist.")
         if not oldmsg:
