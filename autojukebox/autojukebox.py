@@ -72,9 +72,10 @@ class AutoJukebox(commands.Cog):
             await ctx.message.delete()
             return await ctx.send(f"You're not in {suggest_channel.mention}!", delete_after=5)
         
-        if ctx.author not in self.antispam[ctx.guild]:
-            self.antispam[ctx.guild][ctx.author] = utils.AntiSpam([(timedelta(days=1), 6)])
-        if self.antispam[ctx.guild][ctx.author].spammy:
+        antispam_key = (ctx.guild.id, ctx.author.id)
+        if antispam_key not in self.antispam:
+            self.antispam[antispam_key] = utils.AntiSpam([(timedelta(minutes=1), 6)])
+        if self.antispam[antispam_key].spammy:
             return await ctx.send("Uh oh, you're doing this way too frequently.")
         
         if not ctx.message.attachments:
