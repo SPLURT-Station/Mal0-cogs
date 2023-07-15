@@ -92,7 +92,7 @@ class AutoJukebox(commands.Cog):
             return await ctx.message.reply(f"Your file is too thicc! the max filesize is {max_song_size}mb.", delete_after=5)
         
         async with ctx.typing():
-            path_name = os.path.join(os.getcwd(), attachment.filename)
+            path_name = os.path.abspath(os.path.join(os.getcwd(), attachment.filename))
             await attachment.save(path_name)
             
             ogg_audio = AudioSegment.from_ogg(path_name)
