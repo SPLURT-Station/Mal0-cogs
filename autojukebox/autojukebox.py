@@ -157,7 +157,7 @@ class AutoJukebox(commands.Cog):
         attachment = oldmsg.attachments[0]
         song_length = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).length()
         song_bpm = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).bpm()
-        song_id = len([name for name in os.listdir(jukebox_folder)])
+        song_id = len([name for name in os.listdir(jukebox_folder)]) + 1
         await attachment.save(os.path.join(jukebox_folder, f"{os.path.splitext(os.path.basename(attachment.filename))[0]}+{song_length/100}+{song_bpm}+{song_id}.ogg"))
         
         op_data = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).author()
