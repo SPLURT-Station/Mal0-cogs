@@ -1,0 +1,20 @@
+{
+    "author": [
+        "Mosley"
+    ],
+    "description": "Allow for automatic addition of new songs into the jukebox",
+    "install_msg": "Reminder to set up your configs for this to work correctly!",
+    "short": "SS13 AutoJukebox",
+    "Name": "SS13 AutoJukebox",
+    "requirements": [
+        "pydub"
+    ],
+    "tags": [
+        "Space Station 13",
+        "SS13",
+        "Game",
+        "jukebox",
+        "Utility"
+    ],
+    "min_bot_version" :"3.5.0"
+}
