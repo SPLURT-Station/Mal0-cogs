@@ -261,7 +261,7 @@ class AutoJukebox(commands.Cog):
         await ctx.message.reply(f"Jukebox files will now be saved to {path}")
     
     @setjukesuggest.command()
-    async def maxlength(self, ctx: commands.Context, length: int):
+    async def maxlength(self, ctx: commands.Context, length: float):
         """
         Set the max length for jukebox suggestions (in minutes)
         """
