@@ -223,7 +223,7 @@ class AutoJukebox(commands.Cog):
         await ctx.tick()
     
     @setjukesuggest.command()
-    async def suggest_id(self, ctx: commands.Context, channel: discord.TextChannel):
+    async def suggestchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Set the channel for jukebox suggestions
         """
@@ -231,7 +231,7 @@ class AutoJukebox(commands.Cog):
         await ctx.tick()
     
     @setjukesuggest.command()
-    async def mods_id(self, ctx: commands.Context, channel: discord.TextChannel):
+    async def modschannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """
         Set the channel for jukebox mod actions
         """
@@ -240,7 +240,7 @@ class AutoJukebox(commands.Cog):
     
     @setjukesuggest.command()
     @checks.is_owner()
-    async def save_path(self, ctx: commands.Context, path: str):
+    async def savepath(self, ctx: commands.Context, path: str):
         """
         Set the path for jukebox files
         """
@@ -248,7 +248,7 @@ class AutoJukebox(commands.Cog):
         await ctx.tick()
     
     @setjukesuggest.command()
-    async def max_length(self, ctx: commands.Context, length: int):
+    async def maxlength(self, ctx: commands.Context, length: int):
         """
         Set the max length for jukebox suggestions (in minutes)
         """
@@ -256,7 +256,7 @@ class AutoJukebox(commands.Cog):
         await ctx.tick()
     
     @setjukesuggest.command()
-    async def max_size(self, ctx: commands.Context, size: int):
+    async def maxsize(self, ctx: commands.Context, size: int):
         """
         Set the max size for jukebox suggestions (in MB)
         """
