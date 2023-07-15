@@ -60,7 +60,7 @@ class AutoJukebox(commands.Cog):
         mods_id = await self.config.guild(ctx.guild).mods_id()
         current_id = await self.config.guild(ctx.guild).next_id()
         enabled = await self.config.guild(ctx.guild).toggle()
-        max_song_size = (1024**3) * await self.config.guild(ctx.guild).max_size()
+        max_song_size = (1024**2) * await self.config.guild(ctx.guild).max_size()
         max_song_length = await self.config.guild(ctx.guild).max_length()
         
         if not suggest_id or not mods_id or not enabled:
