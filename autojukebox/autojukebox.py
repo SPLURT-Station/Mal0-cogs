@@ -51,6 +51,8 @@ class AutoJukebox(commands.Cog):
     async def jukebox_suggest(self, ctx: commands.Context, bpm: int):
         """
         Suggest a song to be added to the jukebox
+        Remember to attach an .ogg file to your suggestion. Keep in mind
+        the name you give your file is how it'll appear in game!
         
         - bpm: the beats per minute (bpm) of the song
         """
@@ -228,6 +230,7 @@ class AutoJukebox(commands.Cog):
         current_toggle = await self.config.guild(ctx.guild).toggle()
         await self.config.guild(ctx.guild).toggle.set(not current_toggle)
         await ctx.tick()
+        await ctx.message.reply(f"Jukebox suggestions are now {'enabled' if not current_toggle else 'disabled'}")
     
     @setjukesuggest.command()
     async def suggestchannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -236,6 +239,7 @@ class AutoJukebox(commands.Cog):
         """
         await self.config.guild(ctx.guild).suggest_id.set(channel.id)
         await ctx.tick()
+        await ctx.message.reply(f"Jukebox suggestions will now be sent to {channel.mention}")
     
     @setjukesuggest.command()
     async def modschannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -244,6 +248,7 @@ class AutoJukebox(commands.Cog):
         """
         await self.config.guild(ctx.guild).mods_id.set(channel.id)
         await ctx.tick()
+        await ctx.message.reply(f"Jukebox mod actions will now be sent to {channel.mention}")
     
     @setjukesuggest.command()
     @checks.is_owner()
@@ -253,6 +258,7 @@ class AutoJukebox(commands.Cog):
         """
         await self.config.guild(ctx.guild).save_path.set(path)
         await ctx.tick()
+        await ctx.message.reply(f"Jukebox files will now be saved to {path}")
     
     @setjukesuggest.command()
     async def maxlength(self, ctx: commands.Context, length: int):
@@ -261,6 +267,7 @@ class AutoJukebox(commands.Cog):
         """
         await self.config.guild(ctx.guild).max_length.set(length)
         await ctx.tick()
+        await ctx.message.reply(f"Jukebox suggestions will now be limited to {length} minutes")
     
     @setjukesuggest.command()
     async def maxsize(self, ctx: commands.Context, size: int):
@@ -269,6 +276,7 @@ class AutoJukebox(commands.Cog):
         """
         await self.config.guild(ctx.guild).max_size.set(size)
         await ctx.tick()
+        await ctx.message.reply(f"Jukebox suggestions will now be limited to {size} MB")
 
     @setjukesuggest.command()
     @checks.is_owner()
@@ -279,3 +287,4 @@ class AutoJukebox(commands.Cog):
         await self.config.guild(ctx.guild).ffmpeg_path.set(os.path.abspath(path))
         AudioSegment.ffmpeg = os.path.abspath(path)
         await ctx.tick()
+        await ctx.message.reply(f"ffmpeg is now set to {path}")
