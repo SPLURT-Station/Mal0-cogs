@@ -143,7 +143,7 @@ class AutoJukebox(commands.Cog):
         
         msg_id = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).msg_id()
         if msg_id != 0:
-            if await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).finished():
+            if await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished():
                 return await ctx.send("This suggestion has been finished already.")
         
         oldmsg: discord.Message
@@ -155,17 +155,17 @@ class AutoJukebox(commands.Cog):
             return await ctx.send("Uh oh, message with this ID doesn't exist.")
         
         attachment = oldmsg.attachments[0]
-        song_length = await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).length()
-        song_bpm = await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).bpm()
+        song_length = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).length()
+        song_bpm = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).bpm()
         song_id = len([name for name in os.listdir(jukebox_folder) if os.path.isfile(name)])
         await attachment.save(os.path.join(jukebox_folder, f"{os.path.splitext(os.path.basename(attachment.filename))[0]}+{song_length/100}+{song_bpm}+{song_id}"))
         
-        op_data = await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).author()
+        op_data = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).author()
         op = await self.bot.fetch_user(op_data[0])
         await op.send("Your song suggestion, " +  attachment.filename + " has been accepted!")
         
-        await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
-        await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
+        await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
+        await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
         
         await oldmsg.add_reaction("musical_note")
         await ctx.tick()
@@ -190,7 +190,7 @@ class AutoJukebox(commands.Cog):
         suggest_channel = discord.utils.get(ctx.guild.text_channels, id=suggest_id)
         msg_id = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).msg_id()
         if msg_id != 0:
-            if await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).finished():
+            if await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished():
                 return await ctx.send("This suggestion has been finished already.")
             
         oldmsg: discord.Message
@@ -203,12 +203,12 @@ class AutoJukebox(commands.Cog):
         
         attachment = oldmsg.attachments[0]
         
-        op_data = await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).author()
+        op_data = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).author()
         op = await self.bot.fetch_user(op_data[0])
         await op.send("Your song suggestion, " + attachment.filename + "has been rejected.")
         
-        await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
-        await self.config.custom("SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
+        await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
+        await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
         
         await oldmsg.add_reaction("x")
         await ctx.tick()
