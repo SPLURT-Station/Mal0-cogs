@@ -8,7 +8,8 @@ from datetime import timedelta
 import discord
 
 #Redbot imports
-from redbot.core import commands, Config, checks, utils
+from redbot.core import commands, Config
+from redbot.core.utils import antispam
 from redbot.core.bot import Red
 
 class AutoJukebox(commands.Cog):
@@ -74,7 +75,7 @@ class AutoJukebox(commands.Cog):
         
         antispam_key = (ctx.guild.id, ctx.author.id)
         if antispam_key not in self.antispam:
-            self.antispam[antispam_key] = utils.AntiSpam([(timedelta(minutes=1), 6)])
+            self.antispam[antispam_key] = antispam.AntiSpam([(timedelta(minutes=1), 6)])
         if self.antispam[antispam_key].spammy:
             return await ctx.send("Uh oh, you're doing this way too frequently.")
         
