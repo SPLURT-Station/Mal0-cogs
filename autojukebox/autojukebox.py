@@ -93,7 +93,7 @@ class AutoJukebox(commands.Cog):
         
         async with ctx.typing():
             ogg_bytes = io.BytesIO(await attachment.read())
-            ogg_audio = AudioSegment.from_file(ogg_bytes, format="ogg")
+            ogg_audio = AudioSegment.from_ogg(file=ogg_bytes)
             
             if len(ogg_audio) > max_song_length*60000:
                 return await ctx.message.reply(f"Your file is too hung! the max song length is {max_song_length} minutes.", delete_after=5)
