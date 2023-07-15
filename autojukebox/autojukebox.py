@@ -148,7 +148,7 @@ class AutoJukebox(commands.Cog):
         
         oldmsg: discord.Message
         try:
-            oldmsg = await suggest_channel.fetch_message(id=msg_id)
+            oldmsg = await suggest_channel.fetch_message(msg_id)
         except discord.NotFound:
             return await ctx.send("Uh oh, message with this ID doesn't exist.")
         if not oldmsg:
@@ -195,7 +195,7 @@ class AutoJukebox(commands.Cog):
             
         oldmsg: discord.Message
         try:
-            oldmsg = await suggest_channel.fetch_message(id=msg_id)
+            oldmsg = await suggest_channel.fetch_message(msg_id)
         except discord.NotFound:
             return await ctx.send("Uh oh, message with this ID doesn't exist.")
         if not oldmsg:
