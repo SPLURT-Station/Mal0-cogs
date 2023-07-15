@@ -92,7 +92,7 @@ class AutoJukebox(commands.Cog):
             return await ctx.send(f"You must send an .ogg file.", delete_after=5)
         
         if attachment.size > max_song_size:
-            return await ctx.message.reply(f"Your file is too thicc! the max filesize is {round(max_song_size / 1024**2, 2)}mb.", delete_after=5)
+            return await ctx.message.reply(f"Your file is too thicc! the max filesize is {round(max_song_size / 1024**2, 2)}mb.")
         
         async with ctx.typing():
             path_name = os.path.abspath(os.path.join(os.getcwd(), attachment.filename))
@@ -102,7 +102,7 @@ class AutoJukebox(commands.Cog):
             os.remove(path_name)
             
             if len(ogg_audio) > max_song_length*60000:
-                return await ctx.message.reply(f"Your file is too hung! the max song length is {max_song_length} minutes.", delete_after=5)
+                return await ctx.message.reply(f"Your file is too hung! the max song length is {max_song_length} minutes.")
             
             suggest_msg = await mods_channel.send(f"Jukebox suggestion #{current_id} by {ctx.author.mention}", files=[await attachment.to_file()])
             await ctx.tick()
