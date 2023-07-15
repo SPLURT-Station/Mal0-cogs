@@ -204,7 +204,7 @@ class AutoJukebox(commands.Cog):
         
         op_data = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).author()
         op = await self.bot.fetch_user(op_data[0])
-        await op.send("Your song suggestion, " + attachment.filename + "has been rejected.")
+        await op.send("Your song suggestion, " + attachment.filename + " has been rejected.")
         
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
