@@ -110,6 +110,8 @@ class AutoJukebox(commands.Cog):
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, current_id).length.set(len(ogg_audio))
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, current_id).bpm.set(bpm)
         await self.config.guild(ctx.guild).next_id.set(current_id + 1)
+        
+        self.antispam[antispam_key].stamp()
     
     @commands.command(name="jukeapprove")
     @commands.guild_only()
