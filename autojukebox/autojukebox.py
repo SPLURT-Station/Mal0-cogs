@@ -249,7 +249,7 @@ class AutoJukebox(commands.Cog):
     
     @setjukesuggest.command()
     @checks.is_owner()
-    async def savepath(self, ctx: commands.Context, path: str):
+    async def savepath(self, ctx: commands.Context, *, path: str):
         """
         Set the path for jukebox files
         """
