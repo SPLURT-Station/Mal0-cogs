@@ -29,7 +29,8 @@ class AutoJukebox(commands.Cog):
             next_id = 1,
             max_size = 0,
             max_length = 0,
-            save_path = None
+            save_path = None,
+            ffmpeg_path = None
         )
         self.config.init_custom("JUKEBOX_SUGGESTION", 2)
         self.config.register_custom(
@@ -268,4 +269,14 @@ class AutoJukebox(commands.Cog):
         Set the max size for jukebox suggestions (in MB)
         """
         await self.config.guild(ctx.guild).max_size.set(size)
+        await ctx.tick()
+
+    @setjukesuggest.command()
+    @checks.is_owner()
+    async def ffmpeg(self, ctx: commands.Context, *, path: str):
+        """
+        Set the path for ffmpeg
+        """
+        await self.config.guild(ctx.guild).ffmpeg.set(os.path.abspath(path))
+        AudioSegment.ffmpeg = os.path.abspath(path)
         await ctx.tick()
