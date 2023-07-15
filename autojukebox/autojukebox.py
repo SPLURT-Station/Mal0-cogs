@@ -270,7 +270,7 @@ class AutoJukebox(commands.Cog):
         await ctx.message.reply(f"Jukebox suggestions will now be limited to {length} minutes")
     
     @setjukesuggest.command()
-    async def maxsize(self, ctx: commands.Context, size: int):
+    async def maxsize(self, ctx: commands.Context, size: float):
         """
         Set the max size for jukebox suggestions (in MB)
         """
