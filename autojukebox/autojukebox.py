@@ -102,7 +102,7 @@ class AutoJukebox(commands.Cog):
             if len(ogg_audio) > max_song_length*60000:
                 return await ctx.message.reply(f"Your file is too hung! the max song length is {max_song_length} minutes.", delete_after=5)
             
-            await suggest_channel.send(f"Jukebox suggestion #{current_id}", files=[await attachment.to_file()])
+            await suggest_channel.send(f"Jukebox suggestion #{current_id} by {ctx.author.mention}", files=[await attachment.to_file()])
             await ctx.tick()
         
         async with self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, current_id).author() as author:
