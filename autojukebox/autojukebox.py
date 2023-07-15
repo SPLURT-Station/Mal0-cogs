@@ -129,12 +129,13 @@ class AutoJukebox(commands.Cog):
         suggest_id = await self.config.guild(ctx.guild).suggest_id()
         enabled = await self.config.guild(ctx.guild).toggle()
         jukebox_folder = await self.config.guild(ctx.guild).save_path()
+        ffmpeg_folder = await self.config.guild(ctx.guild).ffmpeg_path()
         
         if not enabled:
             return await ctx.send("Jukebox suggestions aren't enabled.")
         if not suggest_id:
             return await ctx.send("There's no suggestions channel.")
-        if not jukebox_folder:
+        if not jukebox_folder or not ffmpeg_folder:
             return await ctx.send("The jukebox path hasn't been configured.")
         
         suggest_channel = discord.utils.get(ctx.guild.text_channels, id=suggest_id)
@@ -277,6 +278,6 @@ class AutoJukebox(commands.Cog):
         """
         Set the path for ffmpeg
         """
-        await self.config.guild(ctx.guild).ffmpeg.set(os.path.abspath(path))
+        await self.config.guild(ctx.guild).ffmpeg_path.set(os.path.abspath(path))
         AudioSegment.ffmpeg = os.path.abspath(path)
         await ctx.tick()
