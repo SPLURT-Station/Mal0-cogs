@@ -168,7 +168,7 @@ class AutoJukebox(commands.Cog):
         
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
-        
+        oldmsg.add_reaction("\N{MUSICAL NOTE}")
         await ctx.tick()
         
     @commands.command(name="jukereject")
@@ -210,7 +210,7 @@ class AutoJukebox(commands.Cog):
         
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
-        
+        await oldmsg.add_reaction("\N{X}")
         await ctx.tick()
         
     @commands.group()
