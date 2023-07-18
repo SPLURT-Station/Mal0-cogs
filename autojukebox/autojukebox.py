@@ -169,7 +169,7 @@ class AutoJukebox(commands.Cog):
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
         await ctx.tick()
-        await oldmsg.add_reaction("\N{MUSICAL NOTE}")
+        await oldmsg.add_reaction(self.bot.get_emoji(933392769647534100))
         
     @commands.command(name="jukereject")
     @commands.guild_only()
@@ -211,7 +211,7 @@ class AutoJukebox(commands.Cog):
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
         await ctx.tick()
-        #await oldmsg.add_reaction("\N{X}")
+        await oldmsg.add_reaction(self.bot.get_emoji(933392807727607818))
         
     @commands.group()
     @commands.guild_only()
