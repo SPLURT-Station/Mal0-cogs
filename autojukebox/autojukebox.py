@@ -118,11 +118,8 @@ class AutoJukebox(commands.Cog):
         await self.config.guild(ctx.guild).next_id.set(current_id + 1)
         
         self.antispam[antispam_key].stamp()
-    
-    @commands.group(invoke_without_command=True, name="jukeapprove")
-    @commands.guild_only()
-    @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
-    async def jukebox_approve(self, ctx: commands.Context, suggestion: int):
+        
+    async def approve_song(self, ctx: commands.Context, suggestion: int):
         """
         Approve a jukebox suggestion and add it to the jukebox files
         
@@ -173,6 +170,13 @@ class AutoJukebox(commands.Cog):
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
         await ctx.tick()
         await oldmsg.add_reaction(self.bot.get_emoji(933392769647534100))
+    
+    @commands.group(invoke_without_command=True, name="jukeapprove")
+    @commands.guild_only()
+    @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
+    async def jukebox_approve(self, ctx: commands.Context, suggestion: int):
+        if ctx.invoked_subcommand is None:
+            await self.approve_song(ctx, suggestion)
         
     @jukebox_approve.command()
     async def mass(self, ctx: commands.Context, a: int, b: int):
@@ -183,12 +187,9 @@ class AutoJukebox(commands.Cog):
         - b: the last suggestion to approve
         """
         for i in range(a, b+1):
-            await self.jukebox_approve(ctx, i)
-    
-    @commands.group(invoke_without_command=True, name="jukereject")
-    @commands.guild_only()
-    @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
-    async def jukebox_reject(self, ctx: commands.Context, suggestion: int):
+            await self.approve_song(ctx, i)
+            
+    async def reject_song(self, ctx: commands.Context, suggestion: int):
         """
         Reject a jukebox song
         
@@ -230,6 +231,13 @@ class AutoJukebox(commands.Cog):
         await ctx.tick()
         await oldmsg.add_reaction(self.bot.get_emoji(933392807727607818))
         
+    @commands.group(invoke_without_command=True, name="jukereject")
+    @commands.guild_only()
+    @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
+    async def jukebox_reject(self, ctx: commands.Context, suggestion: int):
+        if ctx.invoked_subcommand is None:
+            await self.reject_song(ctx, suggestion)
+        
     @jukebox_reject.command()
     async def mass(self, ctx: commands.Context, a: int, b: int):
         """
@@ -239,7 +247,7 @@ class AutoJukebox(commands.Cog):
         - b: the last suggestion to reject
         """
         for i in range(a, b+1):
-            await self.jukebox_reject(ctx, i)
+            await self.reject_song(ctx, i)
         
     @commands.group()
     @commands.guild_only()
