@@ -119,7 +119,7 @@ class AutoJukebox(commands.Cog):
         
         self.antispam[antispam_key].stamp()
     
-    @commands.group(name="jukeapprove")
+    @commands.group(invoke_without_command=True, name="jukeapprove")
     @commands.guild_only()
     @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
     async def jukebox_approve(self, ctx: commands.Context, suggestion: int):
@@ -182,7 +182,7 @@ class AutoJukebox(commands.Cog):
         for i in range(a, b+1):
             await self.jukebox_approve(ctx, i)
     
-    @commands.group(name="jukereject")
+    @commands.group(invoke_without_command=True, name="jukereject")
     @commands.guild_only()
     @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
     async def jukebox_reject(self, ctx: commands.Context, suggestion: int):
