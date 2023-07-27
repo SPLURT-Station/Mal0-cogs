@@ -125,8 +125,6 @@ class AutoJukebox(commands.Cog):
         
         - suggestion: the number of the suggestion to approve
         """
-        if ctx.invoked_subcommand is not None and suggestion is not int:
-            return
         
         mods_id = await self.config.guild(ctx.guild).mods_id()
         enabled = await self.config.guild(ctx.guild).toggle()
@@ -168,7 +166,6 @@ class AutoJukebox(commands.Cog):
         
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
-        await ctx.tick()
         await oldmsg.add_reaction(self.bot.get_emoji(933392769647534100))
     
     @commands.group(invoke_without_command=True, name="jukeapprove")
@@ -176,7 +173,9 @@ class AutoJukebox(commands.Cog):
     @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
     async def jukebox_approve(self, ctx: commands.Context, suggestion: int):
         if ctx.invoked_subcommand is None:
-            await self.approve_song(ctx, suggestion)
+            with ctx.typing():
+                await self.approve_song(ctx, suggestion)
+            await ctx.tick()
         
     @jukebox_approve.command(name="mass")
     async def jukebox_approve_mass(self, ctx: commands.Context, a: int, b: int):
@@ -186,8 +185,10 @@ class AutoJukebox(commands.Cog):
         - a: the first suggestion to approve
         - b: the last suggestion to approve
         """
-        for i in range(a, b+1):
-            await self.approve_song(ctx, i)
+        with ctx.typing():
+            for i in range(a, b+1):
+                await self.approve_song(ctx, i)
+        await ctx.tick()
             
     async def reject_song(self, ctx: commands.Context, suggestion: int):
         """
@@ -195,8 +196,6 @@ class AutoJukebox(commands.Cog):
         
         - suggestion: the number of the jukebox suggestion to reject
         """
-        if ctx.invoked_subcommand is not None and suggestion is not int:
-            return
         
         mods_id = await self.config.guild(ctx.guild).mods_id()
         enabled = await self.config.guild(ctx.guild).toggle()
@@ -236,7 +235,9 @@ class AutoJukebox(commands.Cog):
     @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
     async def jukebox_reject(self, ctx: commands.Context, suggestion: int):
         if ctx.invoked_subcommand is None:
-            await self.reject_song(ctx, suggestion)
+            with ctx.typing():
+                await self.reject_song(ctx, suggestion)
+            await ctx.tick()
         
     @jukebox_reject.command(name="mass")
     async def jukebox_reject_mass(self, ctx: commands.Context, a: int, b: int):
@@ -246,9 +247,11 @@ class AutoJukebox(commands.Cog):
         - a: the first suggestion to reject
         - b: the last suggestion to reject
         """
-        for i in range(a, b+1):
-            await self.reject_song(ctx, i)
-        
+        with ctx.typing():
+            for i in range(a, b+1):
+                await self.reject_song(ctx, i)
+        await ctx.tick()
+
     @commands.group()
     @commands.guild_only()
     @checks.admin_or_permissions(mention_everyone=True)
