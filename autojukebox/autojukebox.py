@@ -179,7 +179,7 @@ class AutoJukebox(commands.Cog):
             await self.approve_song(ctx, suggestion)
         
     @jukebox_approve.command()
-    async def mass(self, ctx: commands.Context, a: int, *, b: int):
+    async def mass(self, ctx: commands.Context, a: int, b: int):
         """
         Mass approve jukebox suggestions
         
@@ -239,7 +239,7 @@ class AutoJukebox(commands.Cog):
             await self.reject_song(ctx, suggestion)
         
     @jukebox_reject.command()
-    async def mass(self, ctx: commands.Context, a: int, *, b: int):
+    async def mass(self, ctx: commands.Context, a: int, b: int):
         """
         Mass reject jukebox suggestions
         
