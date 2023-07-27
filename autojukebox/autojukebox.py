@@ -128,6 +128,9 @@ class AutoJukebox(commands.Cog):
         
         - suggestion: the number of the suggestion to approve
         """
+        if ctx.invoked_subcommand is not None and suggestion is not int:
+            return
+        
         mods_id = await self.config.guild(ctx.guild).mods_id()
         enabled = await self.config.guild(ctx.guild).toggle()
         jukebox_folder = await self.config.guild(ctx.guild).save_path()
@@ -191,6 +194,9 @@ class AutoJukebox(commands.Cog):
         
         - suggestion: the number of the jukebox suggestion to reject
         """
+        if ctx.invoked_subcommand is not None and suggestion is not int:
+            return
+        
         mods_id = await self.config.guild(ctx.guild).mods_id()
         enabled = await self.config.guild(ctx.guild).toggle()
 
