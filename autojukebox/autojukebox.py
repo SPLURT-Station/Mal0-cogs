@@ -173,7 +173,7 @@ class AutoJukebox(commands.Cog):
     @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
     async def jukebox_approve(self, ctx: commands.Context, suggestion: int):
         if ctx.invoked_subcommand is None:
-            with ctx.typing():
+            async with ctx.typing():
                 await self.approve_song(ctx, suggestion)
             await ctx.tick()
         
@@ -185,7 +185,7 @@ class AutoJukebox(commands.Cog):
         - a: the first suggestion to approve
         - b: the last suggestion to approve
         """
-        with ctx.typing():
+        async with ctx.typing():
             for i in range(a, b+1):
                 await self.approve_song(ctx, i)
         await ctx.tick()
@@ -235,7 +235,7 @@ class AutoJukebox(commands.Cog):
     @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
     async def jukebox_reject(self, ctx: commands.Context, suggestion: int):
         if ctx.invoked_subcommand is None:
-            with ctx.typing():
+            async with ctx.typing():
                 await self.reject_song(ctx, suggestion)
             await ctx.tick()
         
@@ -247,7 +247,7 @@ class AutoJukebox(commands.Cog):
         - a: the first suggestion to reject
         - b: the last suggestion to reject
         """
-        with ctx.typing():
+        async with ctx.typing():
             for i in range(a, b+1):
                 await self.reject_song(ctx, i)
         await ctx.tick()
