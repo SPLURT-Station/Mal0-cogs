@@ -18,9 +18,7 @@ from redbot.core.utils import chat_formatting
 
 log = logging.getLogger("red.oranges_tgdb")
 
-BaseCog = getattr(commands, "Cog", object)
-
-class CkeyTools(BaseCog):
+class CkeyTools(commands.Cog):
     """
     Extension cog for TGDB/TGVerify
     """

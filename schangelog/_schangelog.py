@@ -15,9 +15,7 @@ from redbot.core.utils import chat_formatting
 #Folder imports
 from .reader import readCl, RepoError
 
-BaseCog = getattr(commands, "Cog", object)
-
-class SChangelog(BaseCog):
+class SChangelog(commands.Cog):
     """
     Posts your current SS13 instance changelogs
     """
