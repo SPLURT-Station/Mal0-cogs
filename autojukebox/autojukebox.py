@@ -162,7 +162,10 @@ class AutoJukebox(commands.Cog):
         
         op_data = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).author()
         op = await self.bot.fetch_user(op_data[0])
-        await op.send("Your song suggestion, `" +  attachment.filename + "` has been accepted!")
+        try:
+            await op.send("Your song suggestion, `" +  attachment.filename + "` has been accepted!")
+        except:
+            ctx.send("Could not notify " + op.mention + " of their song approval")
         
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
@@ -223,7 +226,10 @@ class AutoJukebox(commands.Cog):
         
         op_data = await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).author()
         op = await self.bot.fetch_user(op_data[0])
-        await op.send("Your song suggestion, `" + attachment.filename + "` has been rejected.")
+        try:
+            await op.send("Your song suggestion, `" + attachment.filename + "` has been rejected.")
+        except:
+            ctx.send("Could not notify " + op.mention + " of their song denial")
         
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).finished.set(True)
         await self.config.custom("JUKEBOX_SUGGESTION", ctx.guild.id, suggestion).approved.set(True)
