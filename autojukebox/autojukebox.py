@@ -173,7 +173,7 @@ class AutoJukebox(commands.Cog):
     
     @commands.group(invoke_without_command=True, name="jukeapprove")
     @commands.guild_only()
-    @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
+    @checks.admin_or_permissions(mention_everyone=True, manage_messages=True)
     async def jukebox_approve(self, ctx: commands.Context, suggestion: int):
         if ctx.invoked_subcommand is None:
             async with ctx.typing():
@@ -238,7 +238,7 @@ class AutoJukebox(commands.Cog):
         
     @commands.group(invoke_without_command=True, name="jukereject")
     @commands.guild_only()
-    @checks.admin_or_permissions(mention_everyone=True) # Idk what other permissions admins have that mods don't
+    @checks.admin_or_permissions(mention_everyone=True, manage_messages=True)
     async def jukebox_reject(self, ctx: commands.Context, suggestion: int):
         if ctx.invoked_subcommand is None:
             async with ctx.typing():
