@@ -150,13 +150,26 @@ class TGSCommands(commands.Cog):
                 async with session.get(f"{tgs_url}/Instance/List", headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        # If the response is a dict with a key containing the list, extract it
+                        if isinstance(data, dict):
+                            # Try common keys
+                            for key in ("instances", "data", "result"):
+                                if key in data and isinstance(data[key], list):
+                                    data = data[key]
+                                    break
+                        if not isinstance(data, list):
+                            await ctx.send("Unexpected response format from TGS API.")
+                            return
                         if not data:
                             await ctx.send("No instances found.")
                             await ctx.tick()
                             return
                         msg = "**TGS Instances:**\n"
                         for inst in data:
-                            msg += f"\nID: `{inst.get('id', 'N/A')}`\nName: `{inst.get('name', 'N/A')}`\nPath: `{inst.get('path', 'N/A')}`\nEnabled: `{inst.get('enabled', 'N/A')}`\n"
+                            if isinstance(inst, dict):
+                                msg += f"\nID: `{inst.get('id', 'N/A')}`\nName: `{inst.get('name', 'N/A')}`\nPath: `{inst.get('path', 'N/A')}`\nEnabled: `{inst.get('enabled', 'N/A')}`\n"
+                            else:
+                                msg += f"\nInstance: `{str(inst)}`\n"
                         await ctx.send(msg)
                         await ctx.tick()
                     else:
