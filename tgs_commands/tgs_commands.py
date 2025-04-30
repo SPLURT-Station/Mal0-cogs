@@ -77,6 +77,7 @@ class TGSCommands(commands.Cog):
             return False
 
     @commands.group()
+    @commands.admin()
     async def tgs(self, ctx: Context):
         """TGStation Server API commands."""
         pass
@@ -164,3 +165,117 @@ class TGSCommands(commands.Cog):
                         await ctx.send(f"Failed to fetch instances: {resp.status} {await resp.text()}")
         except Exception as e:
             await ctx.send(f"Error fetching instances: {e}")
+
+    @instances.command(name="restart")
+    async def instances_restart(self, ctx: Context, instance_id: int):
+        """Restart the Watchdog for a given instance ID."""
+        if not self.bearer_token:
+            await ctx.send("Not authenticated with TGS. Please authenticate first.")
+            return
+        conf = await self.config.all()
+        tgs_url = conf["tgs_url"].rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {self.bearer_token}",
+            "Api": self.api_header,
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "Instance": str(instance_id)
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(f"{tgs_url}/DreamDaemon", headers=headers) as resp:
+                    if resp.status == 202:
+                        data = await resp.json()
+                        job_id = data.get("id", "N/A")
+                        await ctx.send(f"Restart job started for instance `{instance_id}`. Job ID: `{job_id}`.")
+                        await ctx.tick()
+                    else:
+                        await ctx.send(f"Failed to restart instance {instance_id}: {resp.status} {await resp.text()}")
+        except Exception as e:
+            await ctx.send(f"Error restarting instance: {e}")
+
+    @instances.command(name="launch")
+    async def instances_launch(self, ctx: Context, instance_id: int):
+        """Launch the Watchdog for a given instance ID."""
+        if not self.bearer_token:
+            await ctx.send("Not authenticated with TGS. Please authenticate first.")
+            return
+        conf = await self.config.all()
+        tgs_url = conf["tgs_url"].rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {self.bearer_token}",
+            "Api": self.api_header,
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "Instance": str(instance_id)
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.put(f"{tgs_url}/DreamDaemon", headers=headers) as resp:
+                    if resp.status == 202:
+                        data = await resp.json()
+                        job_id = data.get("id", "N/A")
+                        await ctx.send(f"Launch job started for instance `{instance_id}`. Job ID: `{job_id}`.")
+                        await ctx.tick()
+                    else:
+                        await ctx.send(f"Failed to launch instance {instance_id}: {resp.status} {await resp.text()}")
+        except Exception as e:
+            await ctx.send(f"Error launching instance: {e}")
+
+    @instances.command(name="status")
+    async def instances_status(self, ctx: Context, instance_id: int):
+        """Get the Watchdog status for a given instance ID."""
+        if not self.bearer_token:
+            await ctx.send("Not authenticated with TGS. Please authenticate first.")
+            return
+        conf = await self.config.all()
+        tgs_url = conf["tgs_url"].rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {self.bearer_token}",
+            "Api": self.api_header,
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "Instance": str(instance_id)
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{tgs_url}/DreamDaemon", headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Display some relevant status info
+                        msg = f"**Watchdog Status for Instance `{instance_id}`:**\n"
+                        msg += f"Online: `{data.get('online', 'N/A')}`\n"
+                        msg += f"Port: `{data.get('port', 'N/A')}`\n"
+                        msg += f"Current State: `{data.get('rebootState', 'N/A')}`\n"
+                        await ctx.send(msg)
+                        await ctx.tick()
+                    else:
+                        await ctx.send(f"Failed to get status for instance {instance_id}: {resp.status} {await resp.text()}")
+        except Exception as e:
+            await ctx.send(f"Error getting status: {e}")
+
+    @instances.command(name="stop")
+    async def instances_stop(self, ctx: Context, instance_id: int):
+        """Stop the Watchdog for a given instance ID."""
+        if not self.bearer_token:
+            await ctx.send("Not authenticated with TGS. Please authenticate first.")
+            return
+        conf = await self.config.all()
+        tgs_url = conf["tgs_url"].rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {self.bearer_token}",
+            "Api": self.api_header,
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "Instance": str(instance_id)
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(f"{tgs_url}/DreamDaemon", headers=headers) as resp:
+                    if resp.status == 204:
+                        await ctx.send(f"Watchdog stopped for instance `{instance_id}`.")
+                        await ctx.tick()
+                    else:
+                        await ctx.send(f"Failed to stop instance {instance_id}: {resp.status} {await resp.text()}")
+        except Exception as e:
+            await ctx.send(f"Error stopping instance: {e}")
