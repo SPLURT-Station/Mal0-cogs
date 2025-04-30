@@ -1,0 +1,127 @@
+import aiohttp
+import asyncio
+import base64
+import logging
+from redbot.core import commands, Config
+from redbot.core.commands import Context
+from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import humanize_list
+
+class TGSCommands(commands.Cog):
+    """
+    A cog to interact with the TGS API.
+    """
+    
+    __author__ = "Mosley"
+    __version__ = "1.0.0"
+    
+    def __init__(self, bot):
+        self.bot = bot
+        # Static headers
+        self.api_header = "Tgstation.Server.Api/10.13.0"
+        self.user_agent = "Red-TGS-Bot/1.0.0"
+        # Bearer token and expiry
+        self.bearer_token = None
+        self.token_expiry = None
+        # Redbot config
+        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
+        default_guild = {
+            "tgs_url": "https://your-tgs-url.example.com",
+            "tgs_username": "your_username",
+            "tgs_password": "your_password"
+        }
+        self.config.register_global(**default_guild)
+        # Logger
+        self.log = logging.getLogger("red.tgs_commands")
+
+    async def cog_load(self):
+        await self.authenticate()
+
+    async def authenticate(self):
+        conf = await self.config.all()
+        tgs_url = conf["tgs_url"].rstrip("/")
+        username = conf["tgs_username"]
+        password = conf["tgs_password"]
+        if not all([tgs_url, username, password]):
+            self.log.error("TGS config incomplete. Please set tgs_url, tgs_username, and tgs_password.")
+            self.bearer_token = None
+            self.token_expiry = None
+            return False
+        credentials = f"{username}:{password}"
+        b64_credentials = base64.b64encode(credentials.encode()).decode()
+        headers = {
+            "Authorization": f"Basic {b64_credentials}",
+            "Api": self.api_header,
+            "User-Agent": self.user_agent,
+            "Accept": "application/json"
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{tgs_url}/", headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self.bearer_token = data.get("bearer")
+                        # Optionally parse expiry from JWT if needed
+                        self.token_expiry = None  # Set if you parse expiry
+                        self.log.info("TGS authentication successful.")
+                        return True
+                    else:
+                        self.log.error(f"TGS authentication failed: {resp.status} {await resp.text()}")
+                        self.bearer_token = None
+                        self.token_expiry = None
+                        return False
+        except Exception as e:
+            self.log.error(f"TGS authentication error: {e}")
+            self.bearer_token = None
+            self.token_expiry = None
+            return False
+
+    @commands.group()
+    async def tgs(self, ctx: Context):
+        """TGStation Server API commands."""
+        pass
+
+    @tgs.group()
+    @commands.is_owner()
+    async def config(self, ctx: Context):
+        """Configure TGS API connection (owner only)."""
+        pass
+
+    @config.command()
+    async def seturl(self, ctx: Context, url: str):
+        """Set the TGS API URL."""
+        await self.config.tgs_url.set(url)
+        await ctx.send(f"TGS URL set to: {url}")
+        await ctx.tick()
+
+    @config.command()
+    async def setusername(self, ctx: Context, username: str):
+        """Set the TGS API username."""
+        await self.config.tgs_username.set(username)
+        await ctx.send(f"TGS username set to: {username}")
+        await ctx.tick()
+
+    @config.command()
+    async def setpassword(self, ctx: Context, password: str):
+        """Set the TGS API password."""
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        await self.config.tgs_password.set(password)
+        confirm_msg = await ctx.send("TGS password set.")
+        await asyncio.sleep(1)
+        try:
+            await confirm_msg.delete()
+        except Exception:
+            pass
+
+    @config.command(name="auth")
+    async def config_auth(self, ctx: Context):
+        """Attempt to authenticate with the current config."""
+        result = await self.authenticate()
+        if result:
+            await ctx.send("TGS authentication successful.")
+            await ctx.tick()
+        else:
+            await ctx.send("TGS authentication failed. Check logs for details.")

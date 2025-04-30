@@ -1,0 +1,24 @@
+{
+    "author": [
+        "Mosley"
+    ],
+    "name": "TGSCommands",
+    "short": "TGStation Server API integration.",
+    "description": "A cog to interact with the TGStation Server API, including authentication and command execution.",
+    "install_msg": "Thank you for installing TGSCommands! Use [p]tgs config to set up your TGS API connection.",
+    "requirements": [
+        "aiohttp"
+    ],
+    "tags": [
+        "tgs",
+        "SS13",
+        "api",
+        "server",
+        "admin"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "end_user_data_statement": "This cog stores TGS API credentials (URL, username, password) in Red's Config. No other user data is stored.",
+    "required_cogs": [],
+    "type": "COG"
+}
