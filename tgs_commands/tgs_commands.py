@@ -24,7 +24,7 @@ class TGSCommands(commands.Cog):
         self.bearer_token = None
         self.token_expiry = None
         # Redbot config
-        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
+        self.config = Config.get_conf(self, identifier=926233194443964436, force_registration=True)
         default_guild = {
             "tgs_url": "https://your-tgs-url.example.com",
             "tgs_username": "your_username",
@@ -125,3 +125,41 @@ class TGSCommands(commands.Cog):
             await ctx.tick()
         else:
             await ctx.send("TGS authentication failed. Check logs for details.")
+
+    @tgs.group()
+    async def instances(self, ctx: Context):
+        """Manage TGS instances."""
+        pass
+
+    @instances.command(name="list")
+    async def instances_list(self, ctx: Context):
+        """List all available TGS instances and their information."""
+        if not self.bearer_token:
+            await ctx.send("Not authenticated with TGS. Please authenticate first.")
+            return
+        conf = await self.config.all()
+        tgs_url = conf["tgs_url"].rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {self.bearer_token}",
+            "Api": self.api_header,
+            "User-Agent": self.user_agent,
+            "Accept": "application/json"
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{tgs_url}/Instance/List", headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if not data:
+                            await ctx.send("No instances found.")
+                            await ctx.tick()
+                            return
+                        msg = "**TGS Instances:**\n"
+                        for inst in data:
+                            msg += f"\nID: `{inst.get('id', 'N/A')}`\nName: `{inst.get('name', 'N/A')}`\nPath: `{inst.get('path', 'N/A')}`\nEnabled: `{inst.get('enabled', 'N/A')}`\n"
+                        await ctx.send(msg)
+                        await ctx.tick()
+                    else:
+                        await ctx.send(f"Failed to fetch instances: {resp.status} {await resp.text()}")
+        except Exception as e:
+            await ctx.send(f"Error fetching instances: {e}")
