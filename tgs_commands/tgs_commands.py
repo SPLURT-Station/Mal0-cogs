@@ -6,6 +6,7 @@ from redbot.core import commands, Config
 from redbot.core.commands import Context
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import humanize_list
+from discord.ext import tasks
 
 class TGSCommands(commands.Cog):
 	"""
@@ -35,7 +36,24 @@ class TGSCommands(commands.Cog):
 		self.log = logging.getLogger("red.tgs_commands")
 
 	async def cog_load(self):
+		# Start the authentication refresh task
+		self.refresh_auth.start()
 		await self.authenticate()
+
+	def cog_unload(self):
+		# Stop the authentication refresh task when unloading
+		self.refresh_auth.cancel()
+
+	@tasks.loop(minutes=5.0)
+	async def refresh_auth(self):
+		"""Task to refresh TGS authentication every 5 minutes."""
+		self.log.debug("Running scheduled authentication refresh...")
+		await self.authenticate()
+
+	@refresh_auth.before_loop
+	async def before_refresh_auth(self):
+		"""Wait until the bot is ready before starting the task."""
+		await self.bot.wait_until_ready()
 
 	async def authenticate(self):
 		conf = await self.config.all()
