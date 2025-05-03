@@ -81,7 +81,7 @@ class TGSCommands(commands.Cog):
 						self.bearer_token = data.get("bearer")
 						# Optionally parse expiry from JWT if needed
 						self.token_expiry = None  # Set if you parse expiry
-						self.log.info("TGS authentication successful.")
+						#self.log.info("TGS authentication successful.")
 						return True
 					else:
 						self.log.error(f"TGS authentication failed: {resp.status} {await resp.text()}")
