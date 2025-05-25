@@ -15,7 +15,7 @@ from tgcommon.models import DiscordLink
 #Redbot imports
 from redbot.core import commands, Config, checks
 from redbot.core.utils import chat_formatting
-from redbot.core import tasks
+from discord.ext import tasks
 
 log = logging.getLogger("red.oranges_tgdb")
 
