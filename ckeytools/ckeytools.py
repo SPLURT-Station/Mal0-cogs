@@ -15,6 +15,7 @@ from tgcommon.models import DiscordLink
 #Redbot imports
 from redbot.core import commands, Config, checks
 from redbot.core.utils import chat_formatting
+from redbot.core import tasks
 
 log = logging.getLogger("red.oranges_tgdb")
 
@@ -43,6 +44,23 @@ class CkeyTools(commands.Cog):
         
         self.config.register_guild(**default_guild)
         self.config.register_role(**default_role)
+        self.donator_update.start()
+    
+    def cog_unload(self):
+        self.donator_update.cancel()
+    
+    #Tasks
+    @tasks.loop(minutes=5)
+    async def donator_update(self):
+        """Updates donator files every 5 minutes"""
+        for guild in self.bot.guilds:
+            enabled = await self.config.guild(guild).autodonator_enabled()
+            if enabled == "on":
+                await self.rebuild_donator_file(guild)
+    
+    @donator_update.before_loop
+    async def before_donator_update(self):
+        await self.bot.wait_until_ready()
     
     #Listeners
     @commands.Cog.listener()
@@ -60,13 +78,6 @@ class CkeyTools(commands.Cog):
         parameters = [member.id]
         results = await self.query_database(query, parameters)
     
-    @commands.Cog.listener()
-    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
-        enabled = await self.config.guild(after.guild).autodonator_enabled()
-        if not (enabled == "on"):
-            return
-        await self.rebuild_donator_file(after.guild)
-
     #ckeytools Commands
     @commands.group()
     @checks.admin_or_permissions(kick_members=True, ban_members=True)
