@@ -5,6 +5,7 @@ import re
 from github import Github, GithubException
 import yaml
 import logging
+import io
 
 class TemplateConfigView(discord.ui.View):
     def __init__(self, schema_fields, on_confirm, on_cancel):
@@ -242,15 +243,32 @@ class SuggestBounties(commands.Cog):
         channel_id = data.get("suggestion_channel")
         channel = ctx.guild.get_channel(channel_id) if channel_id else None
         channel_display = channel.mention if channel else "Not set"
-        schema = data.get("github_schema") or "Not set"
-        template = data.get("github_template") or "Not set"
+        
+        schema = data.get("github_schema")
+        template = data.get("github_template")
         embed = discord.Embed(title="SuggestBounties Configuration", color=await ctx.embed_color())
         embed.add_field(name="GitHub Repo", value=repo, inline=False)
         embed.add_field(name="GitHub Token", value=token, inline=False)
         embed.add_field(name="Suggestion Channel", value=channel_display, inline=False)
-        embed.add_field(name="GitHub Schema", value=schema, inline=False)
-        embed.add_field(name="GitHub Template", value=template, inline=False)
-        await ctx.send(embed=embed)
+        embed.add_field(name="GitHub Schema", value="Set (see attached file)" if schema else "Not set", inline=False)
+        embed.add_field(name="GitHub Template", value="Set (see attached file)" if template else "Not set", inline=False)
+        
+        files = []
+        if schema:
+            schema_file = discord.File(
+                fp=io.BytesIO(schema.encode('utf-8')),
+                filename="github_schema.yml"
+            )
+            files.append(schema_file)
+        
+        if template:
+            template_file = discord.File(
+                fp=io.BytesIO(template.encode('utf-8')),
+                filename="github_template.txt"
+            )
+            files.append(template_file)
+        
+        await ctx.send(embed=embed, files=files)
         await ctx.tick()
 
     @commands.Cog.listener()
