@@ -268,11 +268,13 @@ class SuggestBounties(commands.Cog):
             return self.log.warning(f"[{message.guild}] Message {message.id} has no description, skipping.")
         if not message.content.startswith("Suggestion #"):
             return self.log.warning(f"[{message.guild}] Message {message.id} does not start with 'Suggestion #', skipping.")
+        # Use embed title for status, and embed description for suggestion text
+        if not embed.title or embed.title != "Approved Suggestion":
+            return self.log.warning(f"[{message.guild}] Embed title is not 'Approved Suggestion' in message {message.id}, skipping.")
+        suggestion_text = embed.description.strip()
+        self.log.info(f"[{message.guild}] Found 'Approved Suggestion' embed with description: {suggestion_text}")
+        # Parse for Reason and Results fields
         lines = embed.description.split("\n")
-        try:
-            approved_idx = lines.index("Approved Suggestion")
-        except ValueError:
-            return self.log.warning(f"[{message.guild}] 'Approved Suggestion' section not found in message {message.id}, skipping.")
         try:
             reason_idx = lines.index("Reason")
         except ValueError:
@@ -282,16 +284,17 @@ class SuggestBounties(commands.Cog):
             results_idx = lines.index("Results")
         except ValueError:
             return self.log.warning(f"[{message.guild}] 'Results' section not found in message {message.id}, skipping.")
-        suggestion_text = lines[approved_idx + 1].strip() if approved_idx + 1 < len(lines) else ""
+        # Reason text
         if reason_idx is not None and reason_idx + 1 < len(lines):
             reason_text = lines[reason_idx + 1].strip()
         else:
             reason_text = None
-        self.log.info(f"[{message.guild}] Found 'Approved Suggestion' section at index {approved_idx} with text: {suggestion_text}")
+        # Results text (everything after "Results" line until end of description)
         results_lines = []
         for i in range(results_idx + 1, len(lines)):
             results_lines.append(lines[i])
         results_text = "\n".join(results_lines).strip()
+        # Compose issue body
         issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
         if reason_text:
             issue_body += f"**Reason:**\n{reason_text}\n\n"
