@@ -271,29 +271,23 @@ class SuggestBounties(commands.Cog):
         # Use embed title for status, and embed description for suggestion text
         if not embed.title or embed.title != "Approved Suggestion":
             return self.log.warning(f"[{message.guild}] Embed title is not 'Approved Suggestion' in message {message.id}, skipping.")
-        suggestion_text = embed.description.strip()
+        suggestion_text = embed.description.strip() if embed.description else ""
         self.log.info(f"[{message.guild}] Found 'Approved Suggestion' embed with description: {suggestion_text}")
-        # Parse for Reason and Results fields
-        lines = embed.description.split("\n")
-        try:
-            reason_idx = lines.index("Reason")
-        except ValueError:
-            reason_idx = None
-            self.log.warning(f"[{message.guild}] 'Reason' section not found in message {message.id}, continuing without it.")
-        try:
-            results_idx = lines.index("Results")
-        except ValueError:
-            return self.log.warning(f"[{message.guild}] 'Results' section not found in message {message.id}, skipping.")
-        # Reason text
-        if reason_idx is not None and reason_idx + 1 < len(lines):
-            reason_text = lines[reason_idx + 1].strip()
-        else:
-            reason_text = None
-        # Results text (everything after "Results" line until end of description)
-        results_lines = []
-        for i in range(results_idx + 1, len(lines)):
-            results_lines.append(lines[i])
-        results_text = "\n".join(results_lines).strip()
+        
+        # Parse embed fields for Reason and Results
+        reason_text = None
+        results_text = None
+        
+        for field in embed.fields:
+            if field.name == "Reason" and field.value:
+                reason_text = field.value.strip()
+                self.log.info(f"[{message.guild}] Found 'Reason' field: {reason_text}")
+            elif field.name == "Results" and field.value:
+                results_text = field.value.strip()
+                self.log.info(f"[{message.guild}] Found 'Results' field: {results_text}")
+        
+        if not results_text:
+            return self.log.warning(f"[{message.guild}] 'Results' field not found in message {message.id}, skipping.")
         # Compose issue body
         issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
         if reason_text:
