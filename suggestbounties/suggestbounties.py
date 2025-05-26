@@ -255,6 +255,7 @@ class SuggestBounties(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        self.log.info(f"[{message.guild}] Received message {message.id} from {message.author}")
         if not message.guild or message.author.bot:
             return
         config = self.config.guild(message.guild)
@@ -271,23 +272,31 @@ class SuggestBounties(commands.Cog):
         lines = embed.description.split("\n")
         try:
             approved_idx = lines.index("Approved Suggestion")
+        except ValueError:
+            return self.log.warning(f"[{message.guild}] 'Approved Suggestion' section not found in message {message.id}, skipping.")
+        try:
             reason_idx = lines.index("Reason")
+        except ValueError:
+            reason_idx = None
+            self.log.warning(f"[{message.guild}] 'Reason' section not found in message {message.id}, continuing without it.")
+        try:
             results_idx = lines.index("Results")
         except ValueError:
-            return
+            return self.log.warning(f"[{message.guild}] 'Results' section not found in message {message.id}, skipping.")
         suggestion_text = lines[approved_idx + 1].strip() if approved_idx + 1 < len(lines) else ""
-        reason_text = lines[reason_idx + 1].strip() if reason_idx + 1 < len(lines) else ""
+        if reason_idx is not None and reason_idx + 1 < len(lines):
+            reason_text = lines[reason_idx + 1].strip()
+        else:
+            reason_text = None
+        self.log.info(f"[{message.guild}] Found 'Approved Suggestion' section at index {approved_idx} with text: {suggestion_text}")
         results_lines = []
         for i in range(results_idx + 1, len(lines)):
-            if lines[i].startswith("Suggested by"):
-                break
             results_lines.append(lines[i])
         results_text = "\n".join(results_lines).strip()
-        issue_body = (
-            f"**Suggestion:**\n{suggestion_text}\n\n"
-            f"**Reason:**\n{reason_text}\n\n"
-            f"**Results:**\n{results_text}\n"
-        )
+        issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
+        if reason_text:
+            issue_body += f"**Reason:**\n{reason_text}\n\n"
+        issue_body += f"**Results:**\n{results_text}\n"
         repo_name = await config.github_repo()
         token = await config.github_token()
         schema_yaml = await config.github_schema()
