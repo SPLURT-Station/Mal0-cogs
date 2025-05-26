@@ -255,20 +255,19 @@ class SuggestBounties(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        self.log.info(f"[{message.guild}] Received message {message.id} from {message.author}")
         if not message.guild or message.author.bot:
-            return
+            return self.log.warning(f"[{message.guild}] Message {message.id} from bot, skipping.")
         config = self.config.guild(message.guild)
         suggestion_channel_id = await config.suggestion_channel()
         if not suggestion_channel_id or message.channel.id != suggestion_channel_id:
-            return
+            return self.log.warning(f"[{message.guild}] Message {message.id} not in suggestion channel, skipping.")
         if not message.embeds:
-            return
+            return self.log.warning(f"[{message.guild}] Message {message.id} has no embeds, skipping.")
         embed = message.embeds[0]
         if not embed.description:
-            return
+            return self.log.warning(f"[{message.guild}] Message {message.id} has no description, skipping.")
         if not message.content.startswith("Suggestion #"):
-            return
+            return self.log.warning(f"[{message.guild}] Message {message.id} does not start with 'Suggestion #', skipping.")
         lines = embed.description.split("\n")
         try:
             approved_idx = lines.index("Approved Suggestion")
