@@ -255,8 +255,8 @@ class SuggestBounties(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot:
-            return self.log.warning(f"[{message.guild}] Message {message.id} from bot, skipping.")
+        if not message.guild:
+            return self.log.warning(f"[{message.guild}] Message {message.id} not in a guild, skipping.")
         config = self.config.guild(message.guild)
         suggestion_channel_id = await config.suggestion_channel()
         if not suggestion_channel_id or message.channel.id != suggestion_channel_id:
