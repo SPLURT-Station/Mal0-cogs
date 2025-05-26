@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any
 import re
 from github import Github, GithubException
 import yaml
+import logging
 
 class TemplateConfigView(discord.ui.View):
     def __init__(self, schema_fields, on_confirm, on_cancel):
@@ -103,6 +104,7 @@ class SuggestBounties(commands.Cog):
             github_schema=None, # YAML schema for issue template
             github_template=None, # Template format string
         )
+        self.log = logging.getLogger(f"red.{__name__}")
         # Placeholder for any startup logic, such as loading cache or setting up background tasks
 
     @commands.group() # type: ignore
@@ -112,7 +114,7 @@ class SuggestBounties(commands.Cog):
         Configuration commands for SuggestBounties.
         """
         if ctx.invoked_subcommand is None:
-            await ctx.send_help()
+            return await ctx.send_help()
 
     @suggestbountyset.command()
     async def repo(self, ctx: commands.Context, repo: str):
@@ -127,6 +129,7 @@ class SuggestBounties(commands.Cog):
             return
         await self.config.guild(ctx.guild).github_repo.set(repo)
         await ctx.send(f"✅ GitHub repository set to `{repo}`.")
+        await ctx.tick()
 
     @suggestbountyset.command()
     async def token(self, ctx: commands.Context, token: str):
@@ -152,6 +155,7 @@ class SuggestBounties(commands.Cog):
             return
         await self.config.guild(ctx.guild).github_token.set(token)
         await ctx.send("✅ GitHub token set and validated.")
+        await ctx.tick()
 
     @suggestbountyset.command(name="channel")
     async def suggestion_channel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -163,12 +167,14 @@ class SuggestBounties(commands.Cog):
             return
         await self.config.guild(ctx.guild).suggestion_channel.set(channel.id)
         await ctx.send(f"✅ Suggestion channel set to {channel.mention}.")
+        await ctx.tick()
 
     @suggestbountyset.command()
     async def schema(self, ctx: commands.Context):
         """
         Upload a GitHub issue template schema (YAML) and configure the template format.
         """
+        self.log.info(f"[{ctx.guild}] Starting schema upload process for {ctx.author}")
         await ctx.send("Please upload your GitHub issue template YAML file.")
 
         def check(m):
@@ -176,17 +182,21 @@ class SuggestBounties(commands.Cog):
 
         try:
             msg = await ctx.bot.wait_for("message", check=check, timeout=120)
-        except Exception:
+        except Exception as e:
+            self.log.error(f"[{ctx.guild}] Timed out waiting for schema file upload: {e}")
             await ctx.send("Timed out waiting for a file upload.")
             return
         attachment = msg.attachments[0]
         if not attachment.filename.endswith(('.yml', '.yaml')):
+            self.log.error(f"[{ctx.guild}] Uploaded file is not a YAML file: {attachment.filename}")
             await ctx.send("File must be a .yml or .yaml file.")
             return
         content = await attachment.read()
         try:
             schema = yaml.safe_load(content)
+            self.log.info(f"[{ctx.guild}] YAML schema parsed successfully.")
         except Exception as e:
+            self.log.error(f"[{ctx.guild}] Failed to parse YAML: {e}")
             await ctx.send(f"Failed to parse YAML: {e}")
             return
         # Extract fields from the schema (for form-based templates)
@@ -198,12 +208,19 @@ class SuggestBounties(commands.Cog):
         # Prompt user to enter a template format string
         async def on_confirm(template, interaction):
             if not ctx.guild:
+                self.log.error(f"[No Guild] Tried to save schema/template without a guild context.")
                 await interaction.response.send_message("This command must be used in a guild.", ephemeral=True)
                 return
+            self.log.info(f"[{ctx.guild}] Saving schema and template for {ctx.author}")
             await self.config.guild(ctx.guild).github_schema.set(content.decode())
             await self.config.guild(ctx.guild).github_template.set(template)
             await interaction.response.send_message("Template and schema saved!", ephemeral=True)
+            try:
+                await ctx.tick()
+            except Exception as e:
+                self.log.error(f"[{ctx.guild}] Could not tick after schema save: {e}")
         async def on_cancel():
+            self.log.info(f"[{ctx.guild}] Schema/template setup cancelled by {ctx.author}")
             pass
         view = TemplateConfigView(schema_fields, on_confirm, on_cancel)
         await ctx.send(
@@ -234,6 +251,7 @@ class SuggestBounties(commands.Cog):
         embed.add_field(name="GitHub Schema", value=schema, inline=False)
         embed.add_field(name="GitHub Template", value=template, inline=False)
         await ctx.send(embed=embed)
+        await ctx.tick()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -274,74 +292,55 @@ class SuggestBounties(commands.Cog):
         token = await config.github_token()
         schema_yaml = await config.github_schema()
         schema = yaml.safe_load(schema_yaml) if schema_yaml else None
+        template = await config.github_template()
         suggestion_name = message.content
         suggestion_number = re.search(r"#(\d+)", message.content)
         suggestion_number = suggestion_number.group(1) if suggestion_number else ""
         message_link = message.jump_url
-        # If schema is set, prompt user to fill modal
-        if schema:
-            async def on_modal_submit(modal: SchemaModal, interaction: discord.Interaction):
-                # Build issue body from schema, inserting responses
-                body_md = ""
-                for item in schema.get("body", []):
-                    if item.get("type") == "markdown":
-                        body_md += item["attributes"]["value"] + "\n\n"
-                    elif item.get("type") in ("textarea", "input"):
-                        field_id = item.get("id")
-                        label = item["attributes"].get("label", field_id)
-                        value = modal.responses.get(field_id, "")
-                        body_md += f"### {label}\n{value}\n\n"
-                # Compose title
-                title = schema.get("title", suggestion_name)
-                if "{suggestion_name}" in title:
-                    title = title.replace("{suggestion_name}", suggestion_name)
-                # Labels
-                labels = schema.get("labels", [])
-                try:
-                    gh = Github(token)
-                    repo = gh.get_repo(repo_name)
-                    issue = repo.create_issue(
-                        title=title,
-                        body=body_md,
-                        labels=labels
-                    )
-                    await message.add_reaction("✅")
-                    await interaction.response.send_message(f"GitHub issue created: {issue.html_url}", ephemeral=True)
-                except Exception as e:
-                    await message.add_reaction("❌")
-                    await interaction.response.send_message(f"Failed to create issue: {e}", ephemeral=True)
-            # Show info text as ephemeral message before modal
-            info_texts = []
-            for item in schema.get("body", []):
-                if item.get("type") == "markdown":
-                    info_texts.append(item["attributes"].get("value", ""))
-            if info_texts:
-                await message.channel.send("\n".join(info_texts), reference=message, mention_author=False, delete_after=30)
-            modal = SchemaModal(
-                schema=schema,
-                message_link=message_link,
-                suggestion_name=suggestion_name,
-                suggestion_number=suggestion_number,
-                issue_body=issue_body,
-                on_submit_callback=on_modal_submit
-            )
-            # Prompt the user who posted the suggestion to fill the modal
+        if schema and template:
+            self.log.info(f"[{message.guild}] Creating GitHub issue using template for message {message.id}")
+            template_vars = {
+                "issue_body": issue_body,
+                "suggestion_name": suggestion_name,
+                "suggestion_number": suggestion_number,
+                "message_link": message_link
+            }
             try:
-                await message.author.send("Please fill out the bounty submission form:")
-                await message.author.send_modal(modal)  # type: ignore
-            except Exception:
-                await message.channel.send(f"{message.author.mention}, please enable DMs to fill out the bounty form.")
+                issue_body_filled = template.format(**template_vars)
+            except Exception as e:
+                self.log.error(f"[{message.guild}] Error formatting template: {e}")
+                raise
+            title = schema.get("title", suggestion_name)
+            if "{suggestion_name}" in title:
+                title = title.replace("{suggestion_name}", suggestion_name)
+            labels = schema.get("labels", [])
+            try:
+                self.log.info(f"[{message.guild}] Connecting to GitHub repo {repo_name} to create issue.")
+                gh = Github(token)
+                repo = gh.get_repo(repo_name)
+                issue = repo.create_issue(
+                    title=title,
+                    body=issue_body_filled,
+                    labels=labels
+                )
+                self.log.info(f"[{message.guild}] Issue created: {issue.html_url}")
+                await message.add_reaction("✅")
+            except Exception as e:
+                self.log.error(f"[{message.guild}] Failed to create GitHub issue: {e}")
+                await message.add_reaction("❌")
             return
-        # Fallback: no schema, use default
         try:
+            self.log.info(f"[{message.guild}] Creating GitHub issue using fallback for message {message.id}")
             gh = Github(token)
             repo = gh.get_repo(repo_name)
             issue = repo.create_issue(
                 title=suggestion_name,
                 body=f"{suggestion_name}\n\n{issue_body}\n\n[View Suggestion]({message_link})"
             )
+            self.log.info(f"[{message.guild}] Issue created: {issue.html_url}")
             await message.add_reaction("✅")
         except Exception as e:
+            self.log.error(f"[{message.guild}] Failed to create fallback GitHub issue: {e}")
             await message.add_reaction("❌")
 
     # Placeholder: Add listeners, commands, and background tasks here
