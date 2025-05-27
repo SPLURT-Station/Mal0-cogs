@@ -8,16 +8,15 @@ import logging
 import io
 
 class TemplateConfigView(discord.ui.View):
-    def __init__(self, schema_fields, on_confirm, on_cancel):
+    def __init__(self, schema, on_confirm, on_cancel):
         super().__init__(timeout=300)
-        self.schema_fields = schema_fields
+        self.schema = schema
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
-        self.template_input = None
 
-    @discord.ui.button(label="Submit Template", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Configure Template", style=discord.ButtonStyle.green)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = TemplateInputModal(self.schema_fields, self.on_confirm)
+        modal = TemplateInputModal(self.schema, self.on_confirm)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
@@ -26,21 +25,57 @@ class TemplateConfigView(discord.ui.View):
         await self.on_cancel()
 
 class TemplateInputModal(discord.ui.Modal):
-    def __init__(self, schema_fields, on_confirm):
-        super().__init__(title="Configure Template Format")
-        self.schema_fields = schema_fields
+    def __init__(self, schema, on_confirm):
+        title = schema.get("title", "Configure Template")
+        super().__init__(title=title[:45])
+        self.schema = schema
         self.on_confirm = on_confirm
-        self.template = discord.ui.TextInput(
-            label="Template Format",
-            style=discord.TextStyle.paragraph,
-            placeholder="Enter your template using {issue_body}, {suggestion_name}, {suggestion_number}, {message_link}",
-            required=True,
-            max_length=2000
-        )
-        self.add_item(self.template)
+        self.field_responses = {}
+        
+        # Add title field if schema has a title
+        if "title" in schema:
+            self.title_field = discord.ui.TextInput(
+                label="Issue Title",
+                placeholder=schema.get("title", ""),
+                default=schema.get("title", ""),
+                required=True,
+                max_length=100,
+                style=discord.TextStyle.short
+            )
+            self.add_item(self.title_field)
+        
+        # Parse schema body and create fields (limit to 4 more fields due to Discord's 5 field limit)
+        field_count = 1 if "title" in schema else 0
+        for item in schema.get("body", []):
+            if field_count >= 5:
+                break
+            if item.get("type") in ("textarea", "input"):
+                field_id = item.get("id")
+                label = item["attributes"].get("label", field_id)[:45]
+                placeholder = item["attributes"].get("placeholder", "")[:100]
+                required = item.get("validations", {}).get("required", False)
+                style = discord.TextStyle.paragraph if item["type"] == "textarea" else discord.TextStyle.short
+                
+                field = discord.ui.TextInput(
+                    label=label,
+                    placeholder=placeholder,
+                    required=required,
+                    style=style,
+                    custom_id=field_id
+                )
+                self.add_item(field)
+                field_count += 1
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.on_confirm(self.template.value, interaction)
+        # Collect all field responses
+        responses = {}
+        for child in self.children:
+            if hasattr(child, 'custom_id') and child.custom_id:  # type: ignore
+                responses[child.custom_id] = child.value  # type: ignore
+            elif hasattr(child, 'label') and child.label == "Issue Title":  # type: ignore
+                responses["title"] = child.value  # type: ignore
+        
+        await self.on_confirm(responses, interaction)
 
 # Helper to parse YAML schema and extract modal fields
 class SchemaModal(discord.ui.Modal):
@@ -200,21 +235,15 @@ class SuggestBounties(commands.Cog):
             self.log.error(f"[{ctx.guild}] Failed to parse YAML: {e}")
             await ctx.send(f"Failed to parse YAML: {e}")
             return
-        # Extract fields from the schema (for form-based templates)
-        schema_fields = []
-        if 'body' in schema:
-            for item in schema['body']:
-                if 'id' in item:
-                    schema_fields.append(item['id'])
-        # Prompt user to enter a template format string
-        async def on_confirm(template, interaction):
+        # Prompt user to configure the template using the schema
+        async def on_confirm(responses, interaction):
             if not ctx.guild:
                 self.log.error(f"[No Guild] Tried to save schema/template without a guild context.")
                 await interaction.response.send_message("This command must be used in a guild.", ephemeral=True)
                 return
-            self.log.info(f"[{ctx.guild}] Saving schema and template for {ctx.author}")
+            self.log.info(f"[{ctx.guild}] Saving schema and template responses for {ctx.author}")
             await self.config.guild(ctx.guild).github_schema.set(content.decode())
-            await self.config.guild(ctx.guild).github_template.set(template)
+            await self.config.guild(ctx.guild).github_template.set(str(responses))
             await interaction.response.send_message("Template and schema saved!", ephemeral=True)
             try:
                 await ctx.tick()
@@ -223,9 +252,9 @@ class SuggestBounties(commands.Cog):
         async def on_cancel():
             self.log.info(f"[{ctx.guild}] Schema/template setup cancelled by {ctx.author}")
             pass
-        view = TemplateConfigView(schema_fields, on_confirm, on_cancel)
+        view = TemplateConfigView(schema, on_confirm, on_cancel)
         await ctx.send(
-            "Now configure your template format. Use {issue_body}, {suggestion_name}, {suggestion_number}, {message_link} as placeholders.",
+            "Configure your template using the form that matches your GitHub schema:",
             view=view
         )
 
@@ -321,29 +350,47 @@ class SuggestBounties(commands.Cog):
         suggestion_number = suggestion_number.group(1) if suggestion_number else ""
         message_link = message.jump_url
         if schema and template:
-            self.log.info(f"[{message.guild}] Creating GitHub issue using template for message {message.id}")
-            template_vars = {
-                "issue_body": issue_body,
-                "suggestion_name": suggestion_name,
-                "suggestion_number": suggestion_number,
-                "message_link": message_link
-            }
+            self.log.info(f"[{message.guild}] Creating GitHub issue using schema template for message {message.id}")
             try:
-                issue_body_filled = template.format(**template_vars)
+                # Parse the stored template responses
+                import ast
+                template_responses = ast.literal_eval(template)
             except Exception as e:
-                self.log.error(f"[{message.guild}] Error formatting template: {e}")
-                raise
-            title = schema.get("title", suggestion_name)
-            if "{suggestion_name}" in title:
-                title = title.replace("{suggestion_name}", suggestion_name)
+                self.log.error(f"[{message.guild}] Error parsing template responses: {e}")
+                template_responses = {}
+            
+            # Build issue body from schema, using template responses and auto-filled values
+            body_md = ""
+            for item in schema.get("body", []):
+                if item.get("type") == "markdown":
+                    body_md += item["attributes"]["value"] + "\n\n"
+                elif item.get("type") in ("textarea", "input"):
+                    field_id = item.get("id")
+                    label = item["attributes"].get("label", field_id)
+                    
+                    # Use template response if available, otherwise auto-fill
+                    if field_id in template_responses:
+                        value = template_responses[field_id]
+                    elif field_id == "suggestion-link":
+                        value = message_link
+                    elif field_id == "about-bounty":
+                        value = issue_body
+                    else:
+                        value = ""
+                    
+                    body_md += f"### {label}\n\n{value}\n\n"
+            
+            # Use template title if available, otherwise schema default
+            title = template_responses.get("title", schema.get("title", suggestion_name))
             labels = schema.get("labels", [])
+            
             try:
                 self.log.info(f"[{message.guild}] Connecting to GitHub repo {repo_name} to create issue.")
                 gh = Github(token)
                 repo = gh.get_repo(repo_name)
                 issue = repo.create_issue(
                     title=title,
-                    body=issue_body_filled,
+                    body=body_md,
                     labels=labels
                 )
                 self.log.info(f"[{message.guild}] Issue created: {issue.html_url}")
