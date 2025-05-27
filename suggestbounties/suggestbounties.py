@@ -16,7 +16,18 @@ class TemplateConfigView(discord.ui.View):
 
     @discord.ui.button(label="Configure Template", style=discord.ButtonStyle.green)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = TemplateInputModal(self.schema, self.on_confirm)
+        # Use SchemaModal instead of TemplateInputModal for proper dynamic field generation
+        async def modal_callback(modal, modal_interaction):
+            await self.on_confirm(modal.responses, modal_interaction)
+        
+        modal = SchemaModal(
+            schema=self.schema,
+            message_link="",  # Empty for template configuration
+            suggestion_name="",
+            suggestion_number="",
+            issue_body="",
+            on_submit_callback=modal_callback
+        )
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
@@ -24,58 +35,7 @@ class TemplateConfigView(discord.ui.View):
         await interaction.response.send_message("Template configuration cancelled.", ephemeral=True)
         await self.on_cancel()
 
-class TemplateInputModal(discord.ui.Modal):
-    def __init__(self, schema, on_confirm):
-        title = schema.get("title", "Configure Template")
-        super().__init__(title=title[:45])
-        self.schema = schema
-        self.on_confirm = on_confirm
-        self.field_responses = {}
-        
-        # Add title field if schema has a title
-        if "title" in schema:
-            self.title_field = discord.ui.TextInput(
-                label="Issue Title",
-                placeholder=schema.get("title", ""),
-                default=schema.get("title", ""),
-                required=True,
-                max_length=100,
-                style=discord.TextStyle.short
-            )
-            self.add_item(self.title_field)
-        
-        # Parse schema body and create fields (limit to 4 more fields due to Discord's 5 field limit)
-        field_count = 1 if "title" in schema else 0
-        for item in schema.get("body", []):
-            if field_count >= 5:
-                break
-            if item.get("type") in ("textarea", "input"):
-                field_id = item.get("id")
-                label = item["attributes"].get("label", field_id)[:45]
-                placeholder = item["attributes"].get("placeholder", "")[:100]
-                required = item.get("validations", {}).get("required", False)
-                style = discord.TextStyle.paragraph if item["type"] == "textarea" else discord.TextStyle.short
-                
-                field = discord.ui.TextInput(
-                    label=label,
-                    placeholder=placeholder,
-                    required=required,
-                    style=style,
-                    custom_id=field_id
-                )
-                self.add_item(field)
-                field_count += 1
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # Collect all field responses
-        responses = {}
-        for child in self.children:
-            if hasattr(child, 'custom_id') and child.custom_id:  # type: ignore
-                responses[child.custom_id] = child.value  # type: ignore
-            elif hasattr(child, 'label') and child.label == "Issue Title":  # type: ignore
-                responses["title"] = child.value  # type: ignore
-        
-        await self.on_confirm(responses, interaction)
 
 # Helper to parse YAML schema and extract modal fields
 class SchemaModal(discord.ui.Modal):
@@ -91,8 +51,24 @@ class SchemaModal(discord.ui.Modal):
         self.responses = {}
         self.field_map = []  # (id, type, label, required, placeholder, description)
         self.info_texts = []
+        
+        # Add title field if schema has a title
+        if "title" in schema:
+            self.add_item(discord.ui.TextInput(
+                label="Issue Title",
+                placeholder=schema.get("title", ""),
+                default=schema.get("title", ""),
+                required=True,
+                max_length=100,
+                style=discord.TextStyle.short,
+                custom_id="title"
+            ))
+        
         # Parse schema body
+        field_count = 1 if "title" in schema else 0
         for item in schema.get("body", []):
+            if field_count >= 5:  # Discord modal limit
+                break
             if item.get("type") == "markdown":
                 self.info_texts.append(item["attributes"]["value"])
             elif item.get("type") in ("textarea", "input"):
@@ -115,14 +91,15 @@ class SchemaModal(discord.ui.Modal):
                     default=default
                 ))
                 self.field_map.append((field_id, item["type"], label, required, placeholder, description))
+                field_count += 1
         # If less than 1 field, add a dummy so modal is valid
-        if not self.field_map:
+        if field_count == 0:
             self.add_item(discord.ui.TextInput(label="(No fields)", required=False, style=discord.TextStyle.short, custom_id="dummy"))
 
     async def on_submit(self, interaction: discord.Interaction):
         for child in self.children:
-            if hasattr(child, 'custom_id'):
-                self.responses[child.custom_id] = child.value  # type: ignore
+            if hasattr(child, 'custom_id') and getattr(child, 'custom_id', None):
+                self.responses[getattr(child, 'custom_id')] = getattr(child, 'value')  # type: ignore
         await self.on_submit_callback(self, interaction)
 
 class SuggestBounties(commands.Cog):
