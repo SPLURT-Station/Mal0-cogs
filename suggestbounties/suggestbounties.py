@@ -8,14 +8,44 @@ import logging
 import io
 
 class TemplateConfigView(discord.ui.View):
-    def __init__(self, schema, on_confirm, on_cancel):
-        super().__init__(timeout=300)
+    def __init__(self, schema, on_confirm, on_cancel, message=None):
+        super().__init__(timeout=60)  # 1 minute timeout
         self.schema = schema
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
+        self.message = message
+        self.timed_out = False
+
+    async def on_timeout(self):
+        """Called when the view times out"""
+        self.timed_out = True
+        # Disable all buttons
+        for item in self.children:
+            if hasattr(item, 'disabled'):
+                item.disabled = True  # type: ignore
+        
+        if self.message:
+            try:
+                await self.message.edit(
+                    content="⏰ Template configuration timed out. Please run the command again.",
+                    view=self
+                )
+            except discord.NotFound:
+                # Message was deleted
+                pass
+            except Exception:
+                # If editing fails, try to send a new message
+                try:
+                    await self.message.channel.send("⏰ Template configuration timed out. Please run the command again.")
+                except Exception:
+                    pass
 
     @discord.ui.button(label="Configure Template", style=discord.ButtonStyle.green)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.timed_out:
+            await interaction.response.send_message("This configuration has timed out. Please run the command again.", ephemeral=True)
+            return
+            
         # Use SchemaModal instead of TemplateInputModal for proper dynamic field generation
         async def modal_callback(modal, modal_interaction):
             await self.on_confirm(modal.responses, modal_interaction)
@@ -32,6 +62,10 @@ class TemplateConfigView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.timed_out:
+            await interaction.response.send_message("This configuration has timed out. Please run the command again.", ephemeral=True)
+            return
+            
         await interaction.response.send_message("Template configuration cancelled.", ephemeral=True)
         await self.on_cancel()
 
@@ -119,6 +153,24 @@ class SuggestBounties(commands.Cog):
         )
         self.log = logging.getLogger(f"red.{__name__}")
         # Placeholder for any startup logic, such as loading cache or setting up background tasks
+
+    def _replace_wildcards(self, text: str, suggestion_name: str, suggestion_number: str, message_link: str, issue_body: str) -> str:
+        """Replace wildcards in template text with actual values"""
+        if not text:
+            return text
+        
+        replacements = {
+            "{suggestion_name}": suggestion_name,
+            "{suggestion_number}": suggestion_number,
+            "{message_link}": message_link,
+            "{issue_body}": issue_body,
+        }
+        
+        result = text
+        for wildcard, value in replacements.items():
+            result = result.replace(wildcard, value)
+        
+        return result
 
     @commands.group() # type: ignore
     @commands.admin_or_permissions(manage_guild=True)
@@ -229,11 +281,25 @@ class SuggestBounties(commands.Cog):
         async def on_cancel():
             self.log.info(f"[{ctx.guild}] Schema/template setup cancelled by {ctx.author}")
             pass
-        view = TemplateConfigView(schema, on_confirm, on_cancel)
-        await ctx.send(
-            "Configure your template using the form that matches your GitHub schema:",
-            view=view
+        
+        # Create the instruction message with wildcard information
+        instructions = (
+            "Configure your template using the form that matches your GitHub schema.\n\n"
+            "**Available wildcards - use these in any field and they'll be replaced when creating issues:**\n"
+            "```\n"
+            "{suggestion_name}    - The full suggestion message (e.g., 'Suggestion #123')\n"
+            "{suggestion_number}  - Just the number (e.g., '123')\n"
+            "{message_link}       - Discord message URL\n"
+            "{issue_body}         - Formatted suggestion content with reason and results\n"
+            "```\n"
+            "**Example:** `Bounty for {suggestion_name} - See {message_link}`\n"
+            "**Note:** Fields like `suggestion-link` and `about-bounty` are auto-filled if not provided.\n"
+            "⏰ This configuration will timeout in 1 minute."
         )
+        
+        view = TemplateConfigView(schema, on_confirm, on_cancel)
+        message = await ctx.send(instructions, view=view)
+        view.message = message
 
     @suggestbountyset.command()
     async def show(self, ctx: commands.Context):
@@ -348,6 +414,8 @@ class SuggestBounties(commands.Cog):
                     # Use template response if available, otherwise auto-fill
                     if field_id in template_responses:
                         value = template_responses[field_id]
+                        # Replace wildcards in the template response
+                        value = self._replace_wildcards(value, suggestion_name, suggestion_number, message_link, issue_body)
                     elif field_id == "suggestion-link":
                         value = message_link
                     elif field_id == "about-bounty":
@@ -357,8 +425,9 @@ class SuggestBounties(commands.Cog):
                     
                     body_md += f"### {label}\n\n{value}\n\n"
             
-            # Use template title if available, otherwise schema default
+            # Use template title if available, otherwise schema default, and replace wildcards
             title = template_responses.get("title", schema.get("title", suggestion_name))
+            title = self._replace_wildcards(title, suggestion_name, suggestion_number, message_link, issue_body)
             labels = schema.get("labels", [])
             
             try:
