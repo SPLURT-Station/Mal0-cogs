@@ -403,10 +403,12 @@ class SuggestBounties(commands.Cog):
                 template_responses = {}
             
             # Build issue body from schema, using template responses and auto-filled values
+            # Only include textarea and input fields, skip markdown sections
             body_md = ""
             for item in schema.get("body", []):
+                # Skip markdown sections - they're only for form display, not issue content
                 if item.get("type") == "markdown":
-                    body_md += item["attributes"]["value"] + "\n\n"
+                    continue
                 elif item.get("type") in ("textarea", "input"):
                     field_id = item.get("id")
                     label = item["attributes"].get("label", field_id)
@@ -423,7 +425,9 @@ class SuggestBounties(commands.Cog):
                     else:
                         value = ""
                     
-                    body_md += f"### {label}\n\n{value}\n\n"
+                    # Only add the field if it has content
+                    if value.strip():
+                        body_md += f"### {label}\n\n{value}\n\n"
             
             # Use template title if available, otherwise schema default, and replace wildcards
             title = template_responses.get("title", schema.get("title", suggestion_name))
