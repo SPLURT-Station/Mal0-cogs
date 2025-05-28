@@ -274,13 +274,43 @@ class SuggestBounties(commands.Cog):
             await self.config.guild(ctx.guild).github_schema.set(content.decode())
             await self.config.guild(ctx.guild).github_template.set(str(responses))
             await interaction.response.send_message("Template and schema saved!", ephemeral=True)
+            
+            # Edit the original message to show completion and remove buttons
+            try:
+                # Clear the view to remove buttons and stop the timer
+                view.clear_items()
+                view.stop()
+                
+                success_message = (
+                    "✅ **Template and schema saved successfully!**\n\n"
+                    "Your GitHub issue template has been configured and is ready to use. "
+                    "When approved suggestions are detected, they will automatically be converted to GitHub issues using your template."
+                )
+                
+                await message.edit(content=success_message, view=view)
+            except Exception as e:
+                self.log.error(f"[{ctx.guild}] Could not edit message after schema save: {e}")
+            
             try:
                 await ctx.tick()
             except Exception as e:
                 self.log.error(f"[{ctx.guild}] Could not tick after schema save: {e}")
         async def on_cancel():
             self.log.info(f"[{ctx.guild}] Schema/template setup cancelled by {ctx.author}")
-            pass
+            # Edit the original message to show cancellation and remove buttons
+            try:
+                view.clear_items()
+                view.stop()
+                
+                cancel_message = (
+                    "❌ **Template configuration cancelled.**\n\n"
+                    "No changes were made to your configuration. "
+                    "Run the command again if you want to set up the template."
+                )
+                
+                await message.edit(content=cancel_message, view=view)
+            except Exception as e:
+                self.log.error(f"[{ctx.guild}] Could not edit message after cancellation: {e}")
         
         # Create the instruction message with wildcard information
         instructions = (
