@@ -154,7 +154,7 @@ class SuggestBounties(commands.Cog):
         self.log = logging.getLogger(f"red.{__name__}")
         # Placeholder for any startup logic, such as loading cache or setting up background tasks
 
-    def _replace_wildcards(self, text: str, suggestion_name: str, suggestion_number: str, message_link: str, issue_body: str) -> str:
+    def _replace_wildcards(self, text: str, suggestion_name: str, suggestion_number: str, message_link: str, issue_body: str, suggesting_user: str = "") -> str:
         """Replace wildcards in template text with actual values"""
         if not text:
             return text
@@ -164,6 +164,7 @@ class SuggestBounties(commands.Cog):
             "{suggestion_number}": suggestion_number,
             "{message_link}": message_link,
             "{issue_body}": issue_body,
+            "{suggesting_user}": suggesting_user,
         }
         
         result = text
@@ -239,7 +240,6 @@ class SuggestBounties(commands.Cog):
         """
         Upload a GitHub issue template schema (YAML) and configure the template format.
         """
-        self.log.info(f"[{ctx.guild}] Starting schema upload process for {ctx.author}")
         await ctx.send("Please upload your GitHub issue template YAML file.")
 
         def check(m):
@@ -248,29 +248,23 @@ class SuggestBounties(commands.Cog):
         try:
             msg = await ctx.bot.wait_for("message", check=check, timeout=120)
         except Exception as e:
-            self.log.error(f"[{ctx.guild}] Timed out waiting for schema file upload: {e}")
             await ctx.send("Timed out waiting for a file upload.")
             return
         attachment = msg.attachments[0]
         if not attachment.filename.endswith(('.yml', '.yaml')):
-            self.log.error(f"[{ctx.guild}] Uploaded file is not a YAML file: {attachment.filename}")
             await ctx.send("File must be a .yml or .yaml file.")
             return
         content = await attachment.read()
         try:
             schema = yaml.safe_load(content)
-            self.log.info(f"[{ctx.guild}] YAML schema parsed successfully.")
         except Exception as e:
-            self.log.error(f"[{ctx.guild}] Failed to parse YAML: {e}")
             await ctx.send(f"Failed to parse YAML: {e}")
             return
         # Prompt user to configure the template using the schema
         async def on_confirm(responses, interaction):
             if not ctx.guild:
-                self.log.error(f"[No Guild] Tried to save schema/template without a guild context.")
                 await interaction.response.send_message("This command must be used in a guild.", ephemeral=True)
                 return
-            self.log.info(f"[{ctx.guild}] Saving schema and template responses for {ctx.author}")
             await self.config.guild(ctx.guild).github_schema.set(content.decode())
             await self.config.guild(ctx.guild).github_template.set(str(responses))
             await interaction.response.send_message("Template and schema saved!", ephemeral=True)
@@ -289,14 +283,13 @@ class SuggestBounties(commands.Cog):
                 
                 await message.edit(content=success_message, view=view)
             except Exception as e:
-                self.log.error(f"[{ctx.guild}] Could not edit message after schema save: {e}")
+                pass
             
             try:
                 await ctx.tick()
             except Exception as e:
-                self.log.error(f"[{ctx.guild}] Could not tick after schema save: {e}")
+                pass
         async def on_cancel():
-            self.log.info(f"[{ctx.guild}] Schema/template setup cancelled by {ctx.author}")
             # Edit the original message to show cancellation and remove buttons
             try:
                 view.clear_items()
@@ -310,7 +303,7 @@ class SuggestBounties(commands.Cog):
                 
                 await message.edit(content=cancel_message, view=view)
             except Exception as e:
-                self.log.error(f"[{ctx.guild}] Could not edit message after cancellation: {e}")
+                pass
         
         # Create the instruction message with wildcard information
         instructions = (
@@ -321,6 +314,7 @@ class SuggestBounties(commands.Cog):
             "{suggestion_number}  - Just the number (e.g., '123')\n"
             "{message_link}       - Discord message URL\n"
             "{issue_body}         - Formatted suggestion content with reason and results\n"
+            "{suggesting_user}    - The user who made the suggestion\n"
             "```\n"
             "**Example:** `Bounty for {suggestion_name} - See {message_link}`\n"
             "**Note:** Fields like `suggestion-link` and `about-bounty` are auto-filled if not provided.\n"
@@ -376,23 +370,22 @@ class SuggestBounties(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild:
-            return self.log.warning(f"[{message.guild}] Message {message.id} not in a guild, skipping.")
+            return
         config = self.config.guild(message.guild)
         suggestion_channel_id = await config.suggestion_channel()
         if not suggestion_channel_id or message.channel.id != suggestion_channel_id:
-            return self.log.warning(f"[{message.guild}] Message {message.id} not in suggestion channel, skipping.")
+            return
         if not message.embeds:
-            return self.log.warning(f"[{message.guild}] Message {message.id} has no embeds, skipping.")
+            return
         embed = message.embeds[0]
         if not embed.description:
-            return self.log.warning(f"[{message.guild}] Message {message.id} has no description, skipping.")
+            return
         if not message.content.startswith("Suggestion #"):
-            return self.log.warning(f"[{message.guild}] Message {message.id} does not start with 'Suggestion #', skipping.")
+            return
         # Use embed title for status, and embed description for suggestion text
         if not embed.title or embed.title != "Approved Suggestion":
-            return self.log.warning(f"[{message.guild}] Embed title is not 'Approved Suggestion' in message {message.id}, skipping.")
+            return
         suggestion_text = embed.description.strip() if embed.description else ""
-        self.log.info(f"[{message.guild}] Found 'Approved Suggestion' embed with description: {suggestion_text}")
         
         # Parse embed fields for Reason and Results
         reason_text = None
@@ -401,13 +394,20 @@ class SuggestBounties(commands.Cog):
         for field in embed.fields:
             if field.name == "Reason" and field.value:
                 reason_text = field.value.strip()
-                self.log.info(f"[{message.guild}] Found 'Reason' field: {reason_text}")
             elif field.name == "Results" and field.value:
                 results_text = field.value.strip()
-                self.log.info(f"[{message.guild}] Found 'Results' field: {results_text}")
         
         if not results_text:
-            return self.log.warning(f"[{message.guild}] 'Results' field not found in message {message.id}, skipping.")
+            return
+        
+        # Extract suggesting user from embed footer
+        suggesting_user = ""
+        if embed.footer and embed.footer.text:
+            # Footer format: "Suggested by username (ID)"
+            footer_match = re.search(r"Suggested by (.+?) \(\d+\)", embed.footer.text)
+            if footer_match:
+                suggesting_user = footer_match.group(1)
+        
         # Compose issue body
         issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
         if reason_text:
@@ -423,13 +423,11 @@ class SuggestBounties(commands.Cog):
         suggestion_number = suggestion_number.group(1) if suggestion_number else ""
         message_link = message.jump_url
         if schema and template:
-            self.log.info(f"[{message.guild}] Creating GitHub issue using schema template for message {message.id}")
             try:
                 # Parse the stored template responses
                 import ast
                 template_responses = ast.literal_eval(template)
             except Exception as e:
-                self.log.error(f"[{message.guild}] Error parsing template responses: {e}")
                 template_responses = {}
             
             # Build issue body from schema, using template responses and auto-filled values
@@ -447,7 +445,7 @@ class SuggestBounties(commands.Cog):
                     if field_id in template_responses:
                         value = template_responses[field_id]
                         # Replace wildcards in the template response
-                        value = self._replace_wildcards(value, suggestion_name, suggestion_number, message_link, issue_body)
+                        value = self._replace_wildcards(value, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
                     elif field_id == "suggestion-link":
                         value = message_link
                     elif field_id == "about-bounty":
@@ -461,11 +459,10 @@ class SuggestBounties(commands.Cog):
             
             # Use template title if available, otherwise schema default, and replace wildcards
             title = template_responses.get("title", schema.get("title", suggestion_name))
-            title = self._replace_wildcards(title, suggestion_name, suggestion_number, message_link, issue_body)
+            title = self._replace_wildcards(title, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
             labels = schema.get("labels", [])
             
             try:
-                self.log.info(f"[{message.guild}] Connecting to GitHub repo {repo_name} to create issue.")
                 gh = Github(token)
                 repo = gh.get_repo(repo_name)
                 issue = repo.create_issue(
@@ -473,26 +470,19 @@ class SuggestBounties(commands.Cog):
                     body=body_md,
                     labels=labels
                 )
-                self.log.info(f"[{message.guild}] Issue created: {issue.html_url}")
                 await message.add_reaction("✅")
+                self.log.info(f"Successfully created GitHub issue {issue.html_url}")
             except Exception as e:
-                self.log.error(f"[{message.guild}] Failed to create GitHub issue: {e}")
                 await message.add_reaction("❌")
             return
         try:
-            self.log.info(f"[{message.guild}] Creating GitHub issue using fallback for message {message.id}")
             gh = Github(token)
             repo = gh.get_repo(repo_name)
             issue = repo.create_issue(
                 title=suggestion_name,
                 body=f"{suggestion_name}\n\n{issue_body}\n\n[View Suggestion]({message_link})"
             )
-            self.log.info(f"[{message.guild}] Issue created: {issue.html_url}")
             await message.add_reaction("✅")
+            self.log.info(f"Successfully created GitHub issue {issue.html_url}")
         except Exception as e:
-            self.log.error(f"[{message.guild}] Failed to create fallback GitHub issue: {e}")
             await message.add_reaction("❌")
-
-    # Placeholder: Add listeners, commands, and background tasks here
-
-    # Placeholder: Future methods will use PyGithub for all GitHub interactions
