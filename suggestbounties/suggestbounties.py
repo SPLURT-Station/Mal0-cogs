@@ -150,6 +150,7 @@ class SuggestBounties(commands.Cog):
             suggestion_channel=None, # Channel ID for suggestions
             github_schema=None, # YAML schema for issue template
             github_template=None, # Template format string
+            auto_suggestions_enabled=True, # Toggle for automatic suggestion processing
         )
         self.log = logging.getLogger(f"red.{__name__}")
         # Placeholder for any startup logic, such as loading cache or setting up background tasks
@@ -342,10 +343,13 @@ class SuggestBounties(commands.Cog):
         
         schema = data.get("github_schema")
         template = data.get("github_template")
+        auto_enabled = data.get("auto_suggestions_enabled", True)
+        
         embed = discord.Embed(title="SuggestBounties Configuration", color=await ctx.embed_color())
         embed.add_field(name="GitHub Repo", value=repo, inline=False)
         embed.add_field(name="GitHub Token", value=token, inline=False)
         embed.add_field(name="Suggestion Channel", value=channel_display, inline=False)
+        embed.add_field(name="Auto Suggestions", value="✅ Enabled" if auto_enabled else "❌ Disabled", inline=False)
         embed.add_field(name="GitHub Schema", value="Set (see attached file)" if schema else "Not set", inline=False)
         embed.add_field(name="GitHub Template", value="Set (see attached file)" if template else "Not set", inline=False)
         
@@ -367,11 +371,34 @@ class SuggestBounties(commands.Cog):
         await ctx.send(embed=embed, files=files)
         await ctx.tick()
 
+    @suggestbountyset.command()
+    async def toggle(self, ctx: commands.Context):
+        """
+        Toggle automatic suggestion processing on or off.
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+        
+        current_state = await self.config.guild(ctx.guild).auto_suggestions_enabled()
+        new_state = not current_state
+        await self.config.guild(ctx.guild).auto_suggestions_enabled.set(new_state)
+        
+        status = "✅ enabled" if new_state else "❌ disabled"
+        await ctx.send(f"Automatic suggestion processing is now {status}.")
+        await ctx.tick()
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild:
             return
         config = self.config.guild(message.guild)
+        
+        # Check if automatic suggestions are enabled
+        auto_enabled = await config.auto_suggestions_enabled()
+        if not auto_enabled:
+            return
+            
         suggestion_channel_id = await config.suggestion_channel()
         if not suggestion_channel_id or message.channel.id != suggestion_channel_id:
             return
