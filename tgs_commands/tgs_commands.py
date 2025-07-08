@@ -307,9 +307,8 @@ class TGSCommands(commands.Cog):
 			return
 		attachment = ctx.message.attachments[0]
 		filename = attachment.filename
-		self.log.info(f"Filename: {filename}")
 		# Match pattern: [ckey]_preferences_[date_and_time].json
-		match = re.match(r"^([a-zA-Z0-9_]+)_preferences_.*\\.json$", filename)
+		match = re.match(r"^([a-zA-Z0-9_]+)_preferences_.*\.json$", filename)
 		if not match:
 			await ctx.send("Filename must be in the format '[ckey]_preferences_[date_and_time].json'.")
 			return
