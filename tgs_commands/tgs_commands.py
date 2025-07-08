@@ -294,7 +294,7 @@ class TGSCommands(commands.Cog):
 		else:
 			await ctx.send(f"Error stopping instance: {data}")
 
-	@commands.group()
+	@tgs.group()
 	async def savefile(self, ctx: Context):
 		"""Manage SS13 savefiles."""
 		pass
