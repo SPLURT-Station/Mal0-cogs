@@ -6,6 +6,7 @@ from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 from redbot.core.utils import chat_formatting
 from redbot.core.utils.views import SimpleMenu
+import aiomysql
 
 class SS13Verify(commands.Cog):
     """
@@ -19,6 +20,7 @@ class SS13Verify(commands.Cog):
         self.bot = bot
         self.log = logging.getLogger("red.ss13_verify")
         self.config = Config.get_conf(self, identifier=908039527271104514, force_registration=True)
+        self.pool = None  # aiomysql pool
         # Per-guild config
         default_guild = {
             "ticket_channel": None,  # Channel ID for ticket panel
@@ -41,15 +43,103 @@ class SS13Verify(commands.Cog):
         }
         self.config.register_member(**default_member)
 
-    def cog_unload(self):
-        """Cleanup when cog is unloaded."""
-        pass
+    async def cog_load(self):
+        # On cog load, try to connect to DB for all guilds with config
+        for guild in self.bot.guilds:
+            conf = await self.config.guild(guild).all()
+            if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
+                await self.reconnect_database(guild)
+
+    async def reconnect_database(self, guild):
+        """Reconnect the database pool for a guild."""
+        conf = await self.config.guild(guild).all()
+        try:
+            self.pool = await aiomysql.create_pool(
+                host=conf["db_host"],
+                port=conf["db_port"],
+                user=conf["db_user"],
+                password=conf["db_password"],
+                db=conf["db_name"],
+                autocommit=True,
+                minsize=1,
+                maxsize=5,
+                charset="utf8mb4"
+            )
+            self.log.info(f"Connected to database for guild {guild.name} ({guild.id})")
+        except Exception as e:
+            self.pool = None
+            self.log.error(f"Failed to connect to database for guild {guild.name} ({guild.id}): {e}")
+
+    async def query_database(self, query, parameters=None):
+        """Run a query using the current pool."""
+        if not self.pool:
+            raise RuntimeError("Database is not connected.")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, parameters or [])
+                if query.strip().lower().startswith("select"):
+                    return await cur.fetchall()
+                else:
+                    await conn.commit()
+                    return cur.rowcount
 
     @commands.group()
     @checks.admin_or_permissions(manage_guild=True)
     async def ss13verify(self, ctx):
         """SS13 Verification system configuration."""
         pass
+
+    @ss13verify.group()
+    @checks.admin_or_permissions(administrator=True)
+    async def database(self, ctx):
+        """Configure database connection for SS13 verification."""
+        pass
+
+    @database.command()
+    async def host(self, ctx, host: str):
+        await self.config.guild(ctx.guild).db_host.set(host)
+        await ctx.send(f"Database host set to `{host}`.")
+        await ctx.tick()
+
+    @database.command()
+    async def port(self, ctx, port: int):
+        await self.config.guild(ctx.guild).db_port.set(port)
+        await ctx.send(f"Database port set to `{port}`.")
+        await ctx.tick()
+
+    @database.command()
+    async def user(self, ctx, user: str):
+        await self.config.guild(ctx.guild).db_user.set(user)
+        await ctx.send(f"Database user set to `{user}`.")
+        await ctx.tick()
+
+    @database.command()
+    async def password(self, ctx, password: str):
+        await self.config.guild(ctx.guild).db_password.set(password)
+        await ctx.send("Database password set.")
+        await ctx.tick()
+
+    @database.command()
+    async def name(self, ctx, name: str):
+        await self.config.guild(ctx.guild).db_name.set(name)
+        await ctx.send(f"Database name set to `{name}`.")
+        await ctx.tick()
+
+    @database.command()
+    async def prefix(self, ctx, prefix: str):
+        await self.config.guild(ctx.guild).mysql_prefix.set(prefix)
+        await ctx.send(f"MySQL table prefix set to `{prefix}`.")
+        await ctx.tick()
+
+    @database.command()
+    async def reconnect(self, ctx):
+        """Reconnect to the database with the current settings."""
+        await self.reconnect_database(ctx.guild)
+        if self.pool:
+            await ctx.send("✅ Database reconnected successfully.")
+            await ctx.tick()
+        else:
+            await ctx.send("❌ Failed to reconnect to the database. Check your settings and try again.")
 
     @ss13verify.group()
     async def panel(self, ctx):
@@ -66,6 +156,7 @@ class SS13Verify(commands.Cog):
 
         await self.config.guild(ctx.guild).ticket_channel.set(channel.id)
         await ctx.send(f"✅ Panel channel set to {channel.mention}")
+        await ctx.tick()
 
         # Create and send the panel message
         await self.create_panel_message(ctx.guild, channel)
@@ -75,6 +166,7 @@ class SS13Verify(commands.Cog):
         """Set the category where verification tickets will be created."""
         await self.config.guild(ctx.guild).ticket_category.set(category.id)
         await ctx.send(f"✅ Ticket category set to {category.name}")
+        await ctx.tick()
 
     @panel.command(name="setembed")
     async def set_panel_embed(self, ctx):
@@ -94,6 +186,7 @@ class SS13Verify(commands.Cog):
             await self.config.guild(ctx.guild).panel_embed.set(embed_dict)
             await ctx.send("✅ Panel embed set successfully!")
             await ctx.send("**Preview:**", embed=embed)
+            await ctx.tick()
         except json.JSONDecodeError:
             await ctx.send("❌ Invalid JSON format in the attached file.")
         except Exception as e:
@@ -117,6 +210,7 @@ class SS13Verify(commands.Cog):
             await self.config.guild(ctx.guild).ticket_embed.set(embed_dict)
             await ctx.send("✅ Ticket embed set successfully!")
             await ctx.send("**Preview:**", embed=embed)
+            await ctx.tick()
         except json.JSONDecodeError:
             await ctx.send("❌ Invalid JSON format in the attached file.")
         except Exception as e:
@@ -143,6 +237,7 @@ class SS13Verify(commands.Cog):
 
         await self.create_panel_message(ctx.guild, channel)
         await ctx.send("✅ Verification panel created!")
+        await ctx.tick()
 
     async def create_panel_message(self, guild: discord.Guild, channel: discord.TextChannel):
         """Create or update the verification panel message."""
