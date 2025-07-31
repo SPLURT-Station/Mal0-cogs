@@ -10,6 +10,7 @@ import aiomysql
 import hashlib
 import datetime
 from discord import ui
+from .helpers import normalise_to_ckey
 
 class SS13Verify(commands.Cog):
     """
@@ -42,6 +43,7 @@ class SS13Verify(commands.Cog):
             "verification_enabled": False,  # Whether verification system is enabled
             "autoverification_enabled": False,  # Whether auto-verification is enabled
             "autoverify_on_join_enabled": False,  # Whether auto-verification on join is enabled
+            "deverified_users": [],  # List of user IDs who have been manually deverified
         }
         self.config.register_guild(**default_guild)
         # Per-user config (for future use, e.g. to track open tickets)
@@ -506,6 +508,14 @@ class SS13Verify(commands.Cog):
             inline=True
         )
 
+        # Add deverified users count
+        deverified_count = len(conf["deverified_users"])
+        embed.add_field(
+            name="🚫 Deverified Users",
+            value=f"{deverified_count} users" if deverified_count > 0 else "None",
+            inline=True
+        )
+
         await ctx.send(embed=embed)
 
     @ss13verify.command()
@@ -526,6 +536,10 @@ class SS13Verify(commands.Cog):
                 color=await ctx.embed_color(),
                 timestamp=discord.utils.utcnow()
             )
+
+            # Check if user has been deverified
+            deverified_users = await self.config.guild(ctx.guild).deverified_users()
+            is_deverified = user.id in deverified_users
 
             if results:
                 link = results[0]
@@ -554,12 +568,179 @@ class SS13Verify(commands.Cog):
                     if channel:
                         embed.add_field(name="Open Ticket", value=channel.mention, inline=True)
 
+            # Show deverified status
+            embed.add_field(
+                name="Deverified",
+                value="🚫 Yes (Auto-verify blocked)" if is_deverified else "✅ No",
+                inline=True
+            )
+
             embed.set_thumbnail(url=user.display_avatar.url)
             await ctx.send(embed=embed)
 
         except Exception as e:
             self.log.error(f"Error checking user verification status: {e}")
             await ctx.send("❌ Error checking verification status.")
+
+    @ss13verify.command()
+    async def ckeys(self, ctx, user: discord.Member):
+        """List all past ckeys this Discord user has verified with."""
+        if not self.pool:
+            await ctx.send("❌ Database is not connected.")
+            return
+
+        message = await ctx.send("Collecting ckeys for Discord user...")
+        async with ctx.typing():
+            try:
+                prefix = await self.config.guild(ctx.guild).mysql_prefix()
+                query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s ORDER BY timestamp DESC"
+                results = await self.query_database(query, [user.id])
+
+                embed = discord.Embed(color=await ctx.embed_color())
+                embed.set_author(
+                    name=f"Ckeys historically linked to {user.display_name}"
+                )
+                embed.set_thumbnail(url=user.display_avatar.url)
+
+                if len(results) <= 0:
+                    return await message.edit(
+                        content="No ckeys found for this Discord user", embed=None
+                    )
+
+                # Check if user has been deverified
+                deverified_users = await self.config.guild(ctx.guild).deverified_users()
+                is_deverified = user.id in deverified_users
+
+                names = ""
+                for link in results:
+                    validity_text = "✅ Valid" if link['valid'] else "❌ Invalid"
+                    timestamp = link['timestamp']
+                    names += f"Ckey `{link['ckey']}` linked on <t:{int(timestamp.timestamp())}:f>, status: {validity_text}\n"
+
+                if len(names) > 1024:  # Discord embed field limit
+                    # Split into multiple fields if too long
+                    chunks = []
+                    current_chunk = ""
+                    for line in names.split('\n'):
+                        if len(current_chunk + line + '\n') > 1024:
+                            chunks.append(current_chunk)
+                            current_chunk = line + '\n'
+                        else:
+                            current_chunk += line + '\n'
+                    if current_chunk:
+                        chunks.append(current_chunk)
+
+                    for i, chunk in enumerate(chunks):
+                        field_name = "__Ckeys__" if i == 0 else f"__Ckeys (cont. {i+1})__"
+                        embed.add_field(name=field_name, value=chunk.strip(), inline=False)
+                else:
+                    embed.add_field(name="__Ckeys__", value=names.strip(), inline=False)
+
+                # Add deverified status
+                if is_deverified:
+                    embed.add_field(
+                        name="⚠️ Notice",
+                        value="This user has been manually deverified and cannot auto-verify.",
+                        inline=False
+                    )
+
+                await message.edit(content=None, embed=embed)
+
+            except Exception as e:
+                self.log.error(f"Error getting ckeys for user {user}: {e}")
+                await message.edit(content="❌ Error retrieving ckey history.")
+
+    @ss13verify.command()
+    async def discords(self, ctx, ckey: str):
+        """List all past Discord accounts this ckey has verified with."""
+        if not self.pool:
+            await ctx.send("❌ Database is not connected.")
+            return
+
+        ckey = normalise_to_ckey(ckey)
+        message = await ctx.send("Collecting Discord accounts for ckey...")
+        async with ctx.typing():
+            try:
+                prefix = await self.config.guild(ctx.guild).mysql_prefix()
+                query = f"SELECT * FROM {prefix}discord_links WHERE ckey = %s ORDER BY timestamp DESC"
+                results = await self.query_database(query, [ckey])
+
+                embed = discord.Embed(color=await ctx.embed_color())
+                embed.set_author(
+                    name=f"Discord accounts historically linked to {str(ckey).title()}"
+                )
+
+                if len(results) <= 0:
+                    return await message.edit(
+                        content="No Discord accounts found for this ckey", embed=None
+                    )
+
+                names = ""
+                for link in results:
+                    validity_text = "✅ Valid" if link['valid'] else "❌ Invalid"
+                    timestamp = link['timestamp']
+                    discord_id = link['discord_id']
+                    if discord_id:
+                        names += f"User <@{discord_id}> linked on <t:{int(timestamp.timestamp())}:f>, status: {validity_text}\n"
+                    else:
+                        names += f"Unlinked token created on <t:{int(timestamp.timestamp())}:f>, status: {validity_text}\n"
+
+                if len(names) > 1024:  # Discord embed field limit
+                    # Split into multiple fields if too long
+                    chunks = []
+                    current_chunk = ""
+                    for line in names.split('\n'):
+                        if len(current_chunk + line + '\n') > 1024:
+                            chunks.append(current_chunk)
+                            current_chunk = line + '\n'
+                        else:
+                            current_chunk += line + '\n'
+                    if current_chunk:
+                        chunks.append(current_chunk)
+
+                    for i, chunk in enumerate(chunks):
+                        field_name = "__Discord accounts__" if i == 0 else f"__Discord accounts (cont. {i+1})__"
+                        embed.add_field(name=field_name, value=chunk.strip(), inline=False)
+                else:
+                    embed.add_field(name="__Discord accounts__", value=names.strip(), inline=False)
+
+                await message.edit(content=None, embed=embed)
+
+            except Exception as e:
+                self.log.error(f"Error getting Discord accounts for ckey {ckey}: {e}")
+                await message.edit(content="❌ Error retrieving Discord account history.")
+
+    @ss13verify.command()
+    async def deverify(self, ctx: commands.Context, user: discord.Member = None):
+        """
+        Deverify a user, removing their verification and preventing auto-verification.
+
+        Users can deverify themselves, or admins can deverify others.
+        The user will be kicked from the server and can rejoin to verify with a new ckey.
+        """
+        # Determine target user
+        target_user = user if user else ctx.author
+
+        # Permission check: users can only deverify themselves, admins can deverify anyone
+        if target_user != ctx.author:
+            if not (ctx.author.guild_permissions.manage_users or
+                   any(role.permissions.manage_users for role in ctx.author.roles)):
+                await ctx.send("❌ You don't have permission to deverify other users.")
+                return
+
+        # Check if database is connected
+        if not self.pool:
+            await ctx.send("❌ Database is not connected.")
+            return
+
+        # Send confirmation view
+        view = DeverifyConfirmView(self, ctx.author, target_user)
+        if target_user == ctx.author:
+            confirmation_msg = f"Are you sure you want to deverify yourself? This will:\n• Remove your current verification\n• Kick you from the server\n• Prevent auto-verification until you verify with a new ckey\n• Allow you to rejoin and verify with a different ckey"
+        else:
+            confirmation_msg = f"Are you sure you want to deverify {target_user.mention}? This will:\n• Remove their current verification\n• Kick them from the server\n• Prevent auto-verification until they verify with a new ckey\n• Allow them to rejoin and verify with a different ckey"
+
+        await ctx.send(confirmation_msg, view=view)
 
     async def create_panel_message(self, guild: discord.Guild, channel: discord.TextChannel):
         """Create or update the verification panel message."""
@@ -610,8 +791,13 @@ class SS13Verify(commands.Cog):
         """
         # Check if auto-verification is enabled
         autoverification_enabled = await self.config.guild(guild).autoverification_enabled()
-        if not autoverification_enabled:
-            # Auto-verification is disabled, simulate as if no link was found
+
+        # Check if user has been manually deverified
+        deverified_users = await self.config.guild(guild).deverified_users()
+        user_is_deverified = user.id in deverified_users
+
+        if not autoverification_enabled or user_is_deverified:
+            # Auto-verification is disabled or user is deverified, simulate as if no link was found
             link = None
         else:
             link = await self.fetch_latest_discord_link(guild, user.id)
@@ -626,7 +812,12 @@ class SS13Verify(commands.Cog):
                     await msg.edit(content=f"Automatic verification completed! Welcome back, `{ckey}`.")
                     return True, ckey
                 else:
-                    failure_msg = "Auto-verification is currently disabled." if not autoverification_enabled else "No previous link found for auto verification."
+                    if user_is_deverified:
+                        failure_msg = "You have been manually deverified. Auto-verification is not available."
+                    elif not autoverification_enabled:
+                        failure_msg = "Auto-verification is currently disabled."
+                    else:
+                        failure_msg = "No previous link found for auto verification."
                     await msg.edit(content=failure_msg)
                     return False, None
         elif dm:
@@ -654,7 +845,9 @@ class SS13Verify(commands.Cog):
                     if panel_channel_id and panel_message_id:
                         panel_message_link = f"https://discord.com/channels/{guild.id}/{panel_channel_id}/{panel_message_id}"
 
-                    if not autoverification_enabled:
+                    if user_is_deverified:
+                        msg = f"You have been manually deverified and cannot auto-verify. Please use the verification panel at {panel_channel_mention} to verify with a new ckey."
+                    elif not autoverification_enabled:
                         msg = f"Auto-verification is currently disabled. Please use the verification panel at {panel_channel_mention} to verify manually."
                     else:
                         msg = f"It seems you have no account linked. Please make sure to link your discord account to your ckey at {panel_channel_mention} in order to verify!"
@@ -674,6 +867,12 @@ class SS13Verify(commands.Cog):
 
     async def finish_verification(self, guild, user, ckey, ticket_channel=None, dm_channel=None):
         """Assign roles, send confirmation, and close the ticket if needed."""
+        # Remove user from deverified list if they were there
+        deverified_users = await self.config.guild(guild).deverified_users()
+        if user.id in deverified_users:
+            deverified_users.remove(user.id)
+            await self.config.guild(guild).deverified_users.set(deverified_users)
+
         # Assign roles
         role_ids = await self.config.guild(guild).verification_roles()
         roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
@@ -692,6 +891,90 @@ class SS13Verify(commands.Cog):
             await self.config.member(user).open_ticket.clear()
         elif dm_channel:
             await dm_channel.send(msg)
+
+    async def perform_deverify(self, guild, target_user, command_author):
+        """Perform the actual deverification process."""
+        try:
+            # Invalidate all valid links for the user in the database
+            prefix = await self.config.guild(guild).mysql_prefix()
+            query = f"UPDATE {prefix}discord_links SET valid = 0 WHERE discord_id = %s AND valid = 1"
+            affected_rows = await self.query_database(query, [target_user.id])
+
+            # Add user to deverified list
+            deverified_users = await self.config.guild(guild).deverified_users()
+            if target_user.id not in deverified_users:
+                deverified_users.append(target_user.id)
+                await self.config.guild(guild).deverified_users.set(deverified_users)
+
+            # Remove verification roles
+            role_ids = await self.config.guild(guild).verification_roles()
+            roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
+            if roles:
+                try:
+                    await target_user.remove_roles(*roles, reason="User deverified")
+                except Exception as e:
+                    self.log.warning(f"Failed to remove roles from {target_user}: {e}")
+
+            # Close any open verification ticket
+            open_ticket = await self.config.member(target_user).open_ticket()
+            if open_ticket:
+                channel = guild.get_channel(open_ticket)
+                if channel:
+                    try:
+                        await channel.delete(reason="User deverified")
+                    except Exception as e:
+                        self.log.warning(f"Failed to delete verification ticket for {target_user}: {e}")
+                await self.config.member(target_user).open_ticket.clear()
+
+            # Try to send DM with invite
+            try:
+                dm_channel = target_user.dm_channel or await target_user.create_dm()
+
+                # Create permanent invite
+                invite = None
+                try:
+                    # Try to get ticket channel first, then any text channel
+                    ticket_channel_id = await self.config.guild(guild).ticket_channel()
+                    invite_channel = guild.get_channel(ticket_channel_id) if ticket_channel_id else None
+                    if not invite_channel:
+                        invite_channel = next((ch for ch in guild.text_channels if ch.permissions_for(guild.me).create_instant_invite), None)
+
+                    if invite_channel:
+                        invite = await invite_channel.create_invite(
+                            max_age=0,  # Never expires
+                            max_uses=0,  # Unlimited uses
+                            reason=f"Deverification invite for {target_user}"
+                        )
+                except Exception as e:
+                    self.log.warning(f"Failed to create invite for {target_user}: {e}")
+
+                dm_msg = f"You have been deverified from **{guild.name}**.\n\n"
+                dm_msg += "This means your current verification has been removed and you can now verify with a different ckey.\n\n"
+                dm_msg += f"You can rejoin the server to verify with a new account"
+                if invite:
+                    dm_msg += f": {invite.url}"
+                else:
+                    dm_msg += "."
+
+                await dm_channel.send(dm_msg)
+
+            except Exception as e:
+                self.log.warning(f"Failed to DM {target_user} about deverification: {e}")
+
+            # Kick the user
+            try:
+                kick_reason = f"Deverified by {command_author} - can rejoin to verify with new ckey"
+                await target_user.kick(reason=kick_reason)
+            except Exception as e:
+                self.log.error(f"Failed to kick {target_user} after deverification: {e}")
+                return False, f"Failed to kick user: {e}"
+
+            self.log.info(f"User {target_user} ({target_user.id}) was deverified by {command_author} in {guild.name}")
+            return True, f"Successfully deverified {target_user.mention}. They have been kicked and can rejoin to verify with a new ckey."
+
+        except Exception as e:
+            self.log.error(f"Error during deverification of {target_user}: {e}")
+            return False, f"An error occurred during deverification: {e}"
 
     async def send_verification_prompt(self, user, ticket_channel, ticket_embed_data):
         """Send the ticket embed with a button to open the verification modal."""
@@ -935,3 +1218,50 @@ class VerificationCodeModal(discord.ui.Modal, title="Enter Verification Code"):
             await interaction.response.send_message(
                 "❌ Could not verify your code. Please try again or ping staff for help.", ephemeral=True
             )
+
+class DeverifyConfirmView(discord.ui.View):
+    """View for confirming deverification."""
+
+    def __init__(self, cog: SS13Verify, command_author: discord.Member, target_user: discord.Member):
+        super().__init__(timeout=60.0)
+        self.cog = cog
+        self.command_author = command_author
+        self.target_user = target_user
+
+    @discord.ui.button(label="Yes, Deverify", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm_deverify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only allow the command author to use the button
+        if interaction.user.id != self.command_author.id:
+            await interaction.response.send_message("You are not authorized to use this button.", ephemeral=True)
+            return
+
+        # Disable all buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        # Perform deverification
+        success, message = await self.cog.perform_deverify(interaction.guild, self.target_user, self.command_author)
+
+        if success:
+            await interaction.followup.send(f"✅ {message}")
+        else:
+            await interaction.followup.send(f"❌ {message}")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_deverify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only allow the command author to use the button
+        if interaction.user.id != self.command_author.id:
+            await interaction.response.send_message("You are not authorized to use this button.", ephemeral=True)
+            return
+
+        # Disable all buttons
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(content="❌ Deverification cancelled.", view=self)
+
+    async def on_timeout(self):
+        # Disable all buttons when the view times out
+        for item in self.children:
+            item.disabled = True
