@@ -39,9 +39,9 @@ class SS13Verify(commands.Cog):
             "db_name": None,
             "mysql_prefix": "",
             "invalidate_on_leave": False,  # Whether to invalidate verification when user leaves
-            "verification_enabled": True,  # Whether verification system is enabled
-            "autoverification_enabled": True,  # Whether auto-verification is enabled
-            "autoverify_on_join_enabled": True,  # Whether auto-verification on join is enabled
+            "verification_enabled": False,  # Whether verification system is enabled
+            "autoverification_enabled": False,  # Whether auto-verification is enabled
+            "autoverify_on_join_enabled": False,  # Whether auto-verification on join is enabled
         }
         self.config.register_guild(**default_guild)
         # Per-user config (for future use, e.g. to track open tickets)
