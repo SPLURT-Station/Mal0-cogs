@@ -33,7 +33,7 @@ class SS13Verify(commands.Cog):
             "panel_embed": {},       # JSON dict for the panel embed
             "ticket_embed": {},      # JSON dict for the ticket embed
             "verification_roles": [], # List of role IDs to assign on verification
-            "db_host": None,
+            "db_host": "127.0.0.1",
             "db_port": 3306,
             "db_user": None,
             "db_password": None,
@@ -99,6 +99,11 @@ class SS13Verify(commands.Cog):
         pass
 
     @ss13verify.group()
+    async def settings(self, ctx):
+        """Configure SS13Verify behavior settings."""
+        pass
+
+    @settings.group()
     @checks.admin_or_permissions(administrator=True)
     async def database(self, ctx):
         """Configure database connection for SS13 verification."""
@@ -106,49 +111,170 @@ class SS13Verify(commands.Cog):
 
     @database.command()
     async def host(self, ctx, host: str):
+        """
+        Set the database hostname or IP address.
+
+        This is the hostname or IP address where your MySQL/MariaDB server is running.
+        For local installations, this is usually 'localhost' or '127.0.0.1'.
+
+        Example: `[p]ss13verify settings database host localhost`
+        """
         await self.config.guild(ctx.guild).db_host.set(host)
         await ctx.send(f"Database host set to `{host}`.")
         await ctx.tick()
 
     @database.command()
     async def port(self, ctx, port: int):
+        """
+        Set the database port number.
+
+        This is the port number your MySQL/MariaDB server is listening on.
+        The default MySQL port is 3306. Only change this if your database
+        server is configured to use a different port.
+
+        Example: `[p]ss13verify settings database port 3306`
+        """
         await self.config.guild(ctx.guild).db_port.set(port)
         await ctx.send(f"Database port set to `{port}`.")
         await ctx.tick()
 
     @database.command()
     async def user(self, ctx, user: str):
+        """
+        Set the database username.
+
+        This is the username for the MySQL/MariaDB account that has access
+        to your SS13 database. This account needs SELECT, INSERT, and UPDATE
+        permissions on the discord_links table.
+
+        Example: `[p]ss13verify settings database user ss13_bot`
+        """
         await self.config.guild(ctx.guild).db_user.set(user)
         await ctx.send(f"Database user set to `{user}`.")
         await ctx.tick()
 
     @database.command()
     async def password(self, ctx, password: str):
+        """
+        Set the database password.
+
+        This is the password for the MySQL/MariaDB account specified with the user command.
+
+        **Security Note:** The password will be stored in the bot's configuration.
+        Make sure to use a dedicated database account with limited permissions.
+
+        Example: `[p]ss13verify settings database password your_secure_password`
+        """
         await self.config.guild(ctx.guild).db_password.set(password)
         await ctx.send("Database password set.")
         await ctx.tick()
 
     @database.command()
     async def name(self, ctx, name: str):
+        """
+        Set the database name.
+
+        This is the name of the MySQL/MariaDB database that contains your
+        SS13 server data, including the discord_links table.
+
+        This is typically something like 'ss13_database' or 'tgstation'.
+
+        Example: `[p]ss13verify settings database name ss13_database`
+        """
         await self.config.guild(ctx.guild).db_name.set(name)
         await ctx.send(f"Database name set to `{name}`.")
         await ctx.tick()
 
     @database.command()
     async def prefix(self, ctx, prefix: str):
+        """
+        Set the MySQL table prefix.
+
+        This is the prefix used for your SS13 database tables. Most SS13 servers
+        use an empty prefix (no prefix), but some use prefixes like 'ss13_' or 'tg_'.
+
+        If your discord_links table is just called 'discord_links', leave this empty.
+        If it's called something like 'ss13_discord_links', set this to 'ss13_'.
+
+        Example: `[p]ss13verify settings database prefix ss13_`
+        Example (no prefix): `[p]ss13verify settings database prefix ""`
+        """
         await self.config.guild(ctx.guild).mysql_prefix.set(prefix)
         await ctx.send(f"MySQL table prefix set to `{prefix}`.")
         await ctx.tick()
 
     @database.command()
     async def reconnect(self, ctx):
-        """Reconnect to the database with the current settings."""
+        """
+        Reconnect to the database with the current settings.
+
+        Use this command after configuring all database settings to test
+        the connection and establish the connection pool. The bot will
+        automatically attempt to connect when loaded if all settings are present.
+
+        This command is also useful if the database connection is lost and
+        needs to be re-established.
+
+        Example: `[p]ss13verify settings database reconnect`
+        """
         await self.reconnect_database(ctx.guild)
         if self.pool:
             await ctx.send("✅ Database reconnected successfully.")
             await ctx.tick()
         else:
             await ctx.send("❌ Failed to reconnect to the database. Check your settings and try again.")
+
+    @settings.group()
+    async def roles(self, ctx):
+        """Configure verification roles."""
+        pass
+
+    @roles.command(name="add")
+    async def add_verification_role(self, ctx, role: discord.Role):
+        """Add a role to be assigned upon successful verification."""
+        role_ids = await self.config.guild(ctx.guild).verification_roles()
+        if role.id not in role_ids:
+            role_ids.append(role.id)
+            await self.config.guild(ctx.guild).verification_roles.set(role_ids)
+            await ctx.send(f"✅ Added {role.mention} to verification roles.")
+            await ctx.tick()
+        else:
+            await ctx.send(f"❌ {role.mention} is already a verification role.")
+
+    @roles.command(name="remove")
+    async def remove_verification_role(self, ctx, role: discord.Role):
+        """Remove a role from being assigned upon verification."""
+        role_ids = await self.config.guild(ctx.guild).verification_roles()
+        if role.id in role_ids:
+            role_ids.remove(role.id)
+            await self.config.guild(ctx.guild).verification_roles.set(role_ids)
+            await ctx.send(f"✅ Removed {role.mention} from verification roles.")
+            await ctx.tick()
+        else:
+            await ctx.send(f"❌ {role.mention} is not a verification role.")
+
+    @roles.command(name="list")
+    async def list_verification_roles(self, ctx):
+        """List all roles that will be assigned upon verification."""
+        role_ids = await self.config.guild(ctx.guild).verification_roles()
+        if not role_ids:
+            await ctx.send("❌ No verification roles configured.")
+            return
+
+        roles = [ctx.guild.get_role(rid) for rid in role_ids if ctx.guild.get_role(rid)]
+        if not roles:
+            await ctx.send("❌ No valid verification roles found. Some roles may have been deleted.")
+            return
+
+        role_mentions = [role.mention for role in roles]
+        await ctx.send(f"**Verification Roles:**\n{', '.join(role_mentions)}")
+
+    @roles.command(name="clear")
+    async def clear_verification_roles(self, ctx):
+        """Clear all verification roles."""
+        await self.config.guild(ctx.guild).verification_roles.set([])
+        await ctx.send("✅ Cleared all verification roles.")
+        await ctx.tick()
 
     @ss13verify.group()
     async def panel(self, ctx):
@@ -248,62 +374,6 @@ class SS13Verify(commands.Cog):
         await ctx.send("✅ Verification panel created!")
         await ctx.tick()
 
-    @ss13verify.group()
-    async def roles(self, ctx):
-        """Configure verification roles."""
-        pass
-
-    @roles.command(name="add")
-    async def add_verification_role(self, ctx, role: discord.Role):
-        """Add a role to be assigned upon successful verification."""
-        role_ids = await self.config.guild(ctx.guild).verification_roles()
-        if role.id not in role_ids:
-            role_ids.append(role.id)
-            await self.config.guild(ctx.guild).verification_roles.set(role_ids)
-            await ctx.send(f"✅ Added {role.mention} to verification roles.")
-            await ctx.tick()
-        else:
-            await ctx.send(f"❌ {role.mention} is already a verification role.")
-
-    @roles.command(name="remove")
-    async def remove_verification_role(self, ctx, role: discord.Role):
-        """Remove a role from being assigned upon verification."""
-        role_ids = await self.config.guild(ctx.guild).verification_roles()
-        if role.id in role_ids:
-            role_ids.remove(role.id)
-            await self.config.guild(ctx.guild).verification_roles.set(role_ids)
-            await ctx.send(f"✅ Removed {role.mention} from verification roles.")
-            await ctx.tick()
-        else:
-            await ctx.send(f"❌ {role.mention} is not a verification role.")
-
-    @roles.command(name="list")
-    async def list_verification_roles(self, ctx):
-        """List all roles that will be assigned upon verification."""
-        role_ids = await self.config.guild(ctx.guild).verification_roles()
-        if not role_ids:
-            await ctx.send("❌ No verification roles configured.")
-            return
-
-        roles = [ctx.guild.get_role(rid) for rid in role_ids if ctx.guild.get_role(rid)]
-        if not roles:
-            await ctx.send("❌ No valid verification roles found. Some roles may have been deleted.")
-            return
-
-        role_mentions = [role.mention for role in roles]
-        await ctx.send(f"**Verification Roles:**\n{', '.join(role_mentions)}")
-
-    @roles.command(name="clear")
-    async def clear_verification_roles(self, ctx):
-        """Clear all verification roles."""
-        await self.config.guild(ctx.guild).verification_roles.set([])
-        await ctx.send("✅ Cleared all verification roles.")
-        await ctx.tick()
-
-    @ss13verify.group()
-    async def settings(self, ctx):
-        """Configure SS13Verify behavior settings."""
-        pass
 
     @settings.command(name="invalidateonleave")
     async def toggle_invalidate_on_leave(self, ctx, enabled: bool = None):
@@ -723,8 +793,9 @@ class SS13Verify(commands.Cog):
 
         # Permission check: users can only deverify themselves, admins can deverify anyone
         if target_user != ctx.author:
-            if not (ctx.author.guild_permissions.manage_users or
-                   any(role.permissions.manage_users for role in ctx.author.roles)):
+            if not (ctx.author.guild_permissions.kick_members or
+                   ctx.author.guild_permissions.administrator or
+                   any(role.permissions.kick_members or role.permissions.administrator for role in ctx.author.roles)):
                 await ctx.send("❌ You don't have permission to deverify other users.")
                 return
 
@@ -1031,13 +1102,6 @@ class SS13Verify(commands.Cog):
             await interaction.response.send_message(
                 "❌ Error creating verification ticket. Please try again or contact an administrator.", ephemeral=True
             )
-
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        """Handle button interactions."""
-        if interaction.type == discord.InteractionType.component:
-            if interaction.custom_id == "verify_button":
-                await self.handle_verification_request(interaction)
 
     async def handle_verification_request(self, interaction: discord.Interaction):
         """Handle when a user clicks the verification button."""
