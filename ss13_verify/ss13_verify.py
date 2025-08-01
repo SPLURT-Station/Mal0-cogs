@@ -17,7 +17,7 @@ class SS13Verify(commands.Cog):
     SS13 Discord <-> ckey verification and linking system.
     Handles ticket-based verification, role assignment, and database linking.
     """
-    __author__ = "Mal0"
+    __author__ = "Mosley"
     __version__ = "0.1.0"
 
     def __init__(self, bot: Red):
@@ -276,7 +276,7 @@ class SS13Verify(commands.Cog):
         await ctx.send("✅ Cleared all verification roles.")
         await ctx.tick()
 
-    @ss13verify.group()
+    @settings.group()
     async def panel(self, ctx):
         """Configure the verification panel."""
         pass
@@ -1308,9 +1308,9 @@ class DeverifyConfirmView(discord.ui.View):
         success, message = await self.cog.perform_deverify(interaction.guild, self.target_user, self.command_author)
 
         if success:
-            await interaction.followup.send(f"✅ {message}")
+            await interaction.response.send_message(f"✅ {message}")
         else:
-            await interaction.followup.send(f"❌ {message}")
+            await interaction.response.send_message(f"❌ {message}")
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel_deverify(self, interaction: discord.Interaction, button: discord.ui.Button):
