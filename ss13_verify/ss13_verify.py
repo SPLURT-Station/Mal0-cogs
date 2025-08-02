@@ -44,6 +44,11 @@ class SS13Verify(commands.Cog):
             "autoverification_enabled": False,  # Whether auto-verification is enabled
             "autoverify_on_join_enabled": False,  # Whether auto-verification on join is enabled
             "deverified_users": [],  # List of user IDs who have been manually deverified
+            # Ticket permission system
+            "ticket_default_permissions": {},  # Default permissions for @everyone in tickets
+            "ticket_staff_roles": [],  # List of role IDs that get staff access to tickets
+            "ticket_staff_permissions": {},  # Permissions for staff roles in tickets
+            "ticket_opener_permissions": {},  # Permissions for the user who opened the ticket
         }
         self.config.register_guild(**default_guild)
         # Per-user config (for future use, e.g. to track open tickets)
@@ -91,6 +96,226 @@ class SS13Verify(commands.Cog):
                 else:
                     await conn.commit()
                     return cur.rowcount
+
+    def _get_all_discord_permissions(self):
+        """Get a list of all available Discord permissions."""
+        return [
+            'add_reactions', 'administrator', 'attach_files', 'ban_members', 'change_nickname',
+            'connect', 'create_instant_invite', 'create_private_threads', 'create_public_threads',
+            'deafen_members', 'embed_links', 'external_emojis', 'external_stickers',
+            'kick_members', 'manage_channels', 'manage_emojis', 'manage_events', 'manage_guild',
+            'manage_messages', 'manage_nicknames', 'manage_permissions', 'manage_roles',
+            'manage_threads', 'manage_webhooks', 'mention_everyone', 'moderate_members',
+            'move_members', 'mute_members', 'priority_speaker', 'read_message_history',
+            'read_messages', 'request_to_speak', 'send_messages', 'send_messages_in_threads',
+            'send_tts_messages', 'speak', 'stream', 'use_application_commands', 'use_embedded_activities',
+            'use_external_emojis', 'use_external_stickers', 'use_voice_activation', 'view_audit_log',
+            'view_channel', 'view_guild_insights'
+        ]
+
+    def _parse_permission_value(self, value):
+        """Parse permission value string to boolean or None."""
+        value_lower = value.lower()
+        if value_lower in ['allow', 'true', 'yes', '1']:
+            return True
+        elif value_lower in ['deny', 'false', 'no', '0']:
+            return False
+        elif value_lower in ['passthrough', 'neutral', 'none', 'null']:
+            return None
+        else:
+            raise ValueError(f"Invalid permission value: {value}. Use 'allow', 'deny', or 'passthrough'.")
+
+    def _parse_permission_args(self, args_string):
+        """
+        Parse command-line style permission arguments using regex.
+
+        Supports formats like:
+        --permission value --permission2 value2
+        --permission=value --permission2=value2
+        -permission value -permission2 value2
+        -permission=value -permission2=value2
+
+        Returns dict of {permission: value}
+        """
+        import re
+
+        if not args_string.strip():
+            return {}
+
+        permissions = {}
+
+        # Regex pattern to match permission arguments
+        # Matches: --perm=value, --perm value, -perm=value, -perm value
+        # Supports quoted values: --perm="quoted value" or --perm 'quoted value'
+        pattern = r'''
+            (-{1,2})                    # Group 1: One or two dashes
+            ([a-zA-Z_][a-zA-Z0-9_]*)    # Group 2: Permission name (starts with letter/underscore)
+            (?:
+                =                       # Equals sign (for --perm=value format)
+                (?:
+                    "([^"]*)"           # Group 3: Double-quoted value
+                    |'([^']*)'          # Group 4: Single-quoted value
+                    |([^\s]+)           # Group 5: Unquoted value
+                )
+                |                       # OR
+                \s+                     # Whitespace (for --perm value format)
+                (?=(?:                  # Lookahead for next value
+                    "([^"]*)"           # Group 6: Double-quoted value with space
+                    |'([^']*)'          # Group 7: Single-quoted value with space
+                    |([^\s-][^\s]*)     # Group 8: Unquoted value with space (not starting with -)
+                ))
+            )?                          # Value is optional
+        '''
+
+        # Find all permission matches
+        matches = re.finditer(pattern, args_string, re.VERBOSE)
+
+        for match in matches:
+            dashes, perm_name = match.group(1, 2)
+
+            # Extract value from the appropriate group
+            value = None
+            for group_idx in range(3, 9):  # Groups 3-8 contain possible values
+                if match.group(group_idx) is not None:
+                    value = match.group(group_idx)
+                    break
+
+            # If no value found, default to 'allow'
+            if value is None:
+                value = 'allow'
+
+            permissions[perm_name] = value
+
+        # Alternative regex for space-separated format if first pattern doesn't catch everything
+        # This handles cases where the lookahead might miss some patterns
+        if not permissions:
+            # Simpler pattern for basic cases
+            simple_pattern = r'(-{1,2})([a-zA-Z_][a-zA-Z0-9_]*)'
+            simple_matches = re.finditer(simple_pattern, args_string)
+
+            # Convert to list to allow indexing
+            all_matches = list(simple_matches)
+
+            for i, match in enumerate(all_matches):
+                perm_name = match.group(2)
+
+                # Look for value after this permission
+                start_pos = match.end()
+
+                # Check if there's a next permission match
+                if i + 1 < len(all_matches):
+                    end_pos = all_matches[i + 1].start()
+                    text_between = args_string[start_pos:end_pos].strip()
+                else:
+                    text_between = args_string[start_pos:].strip()
+
+                # Extract value from text between matches
+                if text_between:
+                    # Remove any leading = sign
+                    if text_between.startswith('='):
+                        text_between = text_between[1:].strip()
+
+                    # Extract first word/quoted string as value
+                    value_match = re.match(r'^(?:"([^"]*)"|\'([^\']*)\'|([^\s]+))', text_between)
+                    if value_match:
+                        value = value_match.group(1) or value_match.group(2) or value_match.group(3)
+                    else:
+                        value = 'allow'
+                else:
+                    value = 'allow'
+
+                permissions[perm_name] = value
+
+        # Validate permissions and convert values
+        result = {}
+        for perm, value in permissions.items():
+            if perm not in self._get_all_discord_permissions():
+                raise ValueError(f"Invalid permission: {perm}")
+
+            try:
+                parsed_value = self._parse_permission_value(value)
+                result[perm] = parsed_value
+            except ValueError as e:
+                raise ValueError(f"Error parsing permission '{perm}': {e}")
+
+        return result
+
+    def _permission_value_to_string(self, value):
+        """Convert permission boolean/None to string representation."""
+        if value is True:
+            return "Allow"
+        elif value is False:
+            return "Deny"
+        else:
+            return "Passthrough"
+
+    async def _build_ticket_overwrites(self, guild, ticket_opener):
+        """Build permission overwrites for ticket channels based on configuration."""
+        conf = await self.config.guild(guild).all()
+        overwrites = {}
+
+        # Default role (@everyone) permissions
+        default_perms = conf["ticket_default_permissions"]
+        if default_perms:
+            overwrite_kwargs = {}
+            for perm, value in default_perms.items():
+                if perm in self._get_all_discord_permissions():
+                    overwrite_kwargs[perm] = value
+            if overwrite_kwargs:
+                overwrites[guild.default_role] = discord.PermissionOverwrite(**overwrite_kwargs)
+        else:
+            # Default behavior: deny read access to @everyone
+            overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+
+        # Staff roles permissions
+        staff_role_ids = conf["ticket_staff_roles"]
+        staff_perms = conf["ticket_staff_permissions"]
+        for role_id in staff_role_ids:
+            role = guild.get_role(role_id)
+            if role:
+                if staff_perms:
+                    overwrite_kwargs = {}
+                    for perm, value in staff_perms.items():
+                        if perm in self._get_all_discord_permissions():
+                            overwrite_kwargs[perm] = value
+                    if overwrite_kwargs:
+                        overwrites[role] = discord.PermissionOverwrite(**overwrite_kwargs)
+                else:
+                    # Default staff permissions
+                    overwrites[role] = discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                        manage_messages=True,
+                        manage_channels=True
+                    )
+
+        # Ticket opener permissions
+        opener_perms = conf["ticket_opener_permissions"]
+        if opener_perms:
+            overwrite_kwargs = {}
+            for perm, value in opener_perms.items():
+                if perm in self._get_all_discord_permissions():
+                    overwrite_kwargs[perm] = value
+            if overwrite_kwargs:
+                overwrites[ticket_opener] = discord.PermissionOverwrite(**overwrite_kwargs)
+        else:
+            # Default opener permissions
+            overwrites[ticket_opener] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+
+        # Bot permissions (always ensure bot can manage the ticket)
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            manage_channels=True,
+            manage_messages=True
+        )
+
+        return overwrites
 
     @commands.group()
     @checks.admin_or_permissions(manage_guild=True)
@@ -280,6 +505,676 @@ class SS13Verify(commands.Cog):
     async def panel(self, ctx):
         """Configure the verification panel."""
         pass
+
+    @settings.group()
+    async def permissions(self, ctx):
+        """Configure ticket permission system."""
+        pass
+
+    @permissions.command(name="defaultset")
+    async def set_default_permission(self, ctx, *, args: str):
+        """
+        Set default permissions for @everyone in tickets using command-line style arguments.
+
+        Supports multiple formats:
+        --permission value --permission2 value2
+        --permission=value --permission2=value2
+        -permission value -permission2 value2
+        -permission=value -permission2=value2
+
+        Values: allow, deny, or passthrough
+        If no value is specified, defaults to 'allow'
+
+        Examples:
+        `[p]ss13verify settings permissions defaultset --view_channel deny --send_messages allow`
+        `[p]ss13verify settings permissions defaultset -view_channel=deny -send_messages=allow`
+        `[p]ss13verify settings permissions defaultset --embed_links --attach_files deny`
+        """
+        try:
+            new_perms = self._parse_permission_args(args)
+        except ValueError as e:
+            await ctx.send(f"❌ {e}")
+            return
+
+        if not new_perms:
+            await ctx.send("❌ No valid permissions provided. Use `--permission value` format.")
+            return
+
+        current_perms = await self.config.guild(ctx.guild).ticket_default_permissions()
+        current_perms.update(new_perms)
+        await self.config.guild(ctx.guild).ticket_default_permissions.set(current_perms)
+
+        # Build response
+        updated = []
+        for perm, value in new_perms.items():
+            value_str = self._permission_value_to_string(value)
+            updated.append(f"`{perm}`: {value_str}")
+
+        await ctx.send(f"✅ Updated default permissions for @everyone:\n{', '.join(updated)}")
+        await ctx.tick()
+
+    @permissions.command(name="defaultremove")
+    async def remove_default_permission(self, ctx, *, permissions: str):
+        """
+        Remove default permission settings for @everyone in tickets.
+
+        Can remove multiple permissions at once by listing them separated by spaces.
+
+        Examples:
+        `[p]ss13verify settings permissions defaultremove view_channel`
+        `[p]ss13verify settings permissions defaultremove view_channel send_messages attach_files`
+        """
+        permission_list = permissions.split()
+        current_perms = await self.config.guild(ctx.guild).ticket_default_permissions()
+
+        removed = []
+        not_found = []
+
+        for permission in permission_list:
+            if permission in current_perms:
+                del current_perms[permission]
+                removed.append(permission)
+            else:
+                not_found.append(permission)
+
+        if removed:
+            await self.config.guild(ctx.guild).ticket_default_permissions.set(current_perms)
+            await ctx.send(f"✅ Removed default permission settings for: {', '.join(f'`{p}`' for p in removed)}")
+            await ctx.tick()
+
+        if not_found:
+            await ctx.send(f"❌ No settings found for: {', '.join(f'`{p}`' for p in not_found)}")
+
+        if not removed and not not_found:
+            await ctx.send("❌ No permissions specified.")
+
+    @permissions.command(name="defaultlist")
+    async def list_default_permissions(self, ctx):
+        """List all configured default permissions for @everyone in tickets."""
+        current_perms = await self.config.guild(ctx.guild).ticket_default_permissions()
+        if not current_perms:
+            await ctx.send("❌ No default permissions configured for @everyone in tickets.")
+            return
+
+        embed = discord.Embed(
+            title="Default Ticket Permissions (@everyone)",
+            color=await ctx.embed_color(),
+            description="These permissions apply to @everyone role in verification tickets."
+        )
+
+        perm_text = ""
+        for perm, value in current_perms.items():
+            value_str = self._permission_value_to_string(value)
+            perm_text += f"**{perm}**: {value_str}\n"
+
+        embed.add_field(name="Permissions", value=perm_text, inline=False)
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="staffadd")
+    async def add_staff_role(self, ctx, role: discord.Role):
+        """
+        Add a role as a staff role for tickets.
+
+        Example: `[p]ss13verify settings permissions staffadd @Moderator`
+        """
+        staff_roles = await self.config.guild(ctx.guild).ticket_staff_roles()
+        if role.id not in staff_roles:
+            staff_roles.append(role.id)
+            await self.config.guild(ctx.guild).ticket_staff_roles.set(staff_roles)
+            await ctx.send(f"✅ Added {role.mention} as a staff role for tickets.")
+            await ctx.tick()
+        else:
+            await ctx.send(f"❌ {role.mention} is already a staff role for tickets.")
+
+    @permissions.command(name="staffremove")
+    async def remove_staff_role(self, ctx, role: discord.Role):
+        """
+        Remove a role from staff roles for tickets.
+
+        Example: `[p]ss13verify settings permissions staffremove @Moderator`
+        """
+        staff_roles = await self.config.guild(ctx.guild).ticket_staff_roles()
+        if role.id in staff_roles:
+            staff_roles.remove(role.id)
+            await self.config.guild(ctx.guild).ticket_staff_roles.set(staff_roles)
+            await ctx.send(f"✅ Removed {role.mention} from staff roles for tickets.")
+            await ctx.tick()
+        else:
+            await ctx.send(f"❌ {role.mention} is not a staff role for tickets.")
+
+    @permissions.command(name="stafflist")
+    async def list_staff_roles(self, ctx):
+        """List all staff roles for tickets."""
+        staff_role_ids = await self.config.guild(ctx.guild).ticket_staff_roles()
+        if not staff_role_ids:
+            await ctx.send("❌ No staff roles configured for tickets.")
+            return
+
+        roles = [ctx.guild.get_role(rid) for rid in staff_role_ids if ctx.guild.get_role(rid)]
+        if not roles:
+            await ctx.send("❌ No valid staff roles found. Some roles may have been deleted.")
+            return
+
+        role_mentions = [role.mention for role in roles]
+        await ctx.send(f"**Staff Roles for Tickets:**\n{', '.join(role_mentions)}")
+
+    @permissions.command(name="staffset")
+    async def set_staff_permission(self, ctx, *, args: str):
+        """
+        Set permissions for staff roles in tickets using command-line style arguments.
+
+        Supports multiple formats:
+        --permission value --permission2 value2
+        --permission=value --permission2=value2
+        -permission value -permission2 value2
+        -permission=value -permission2=value2
+
+        Values: allow, deny, or passthrough
+        If no value is specified, defaults to 'allow'
+
+        Examples:
+        `[p]ss13verify settings permissions staffset --manage_messages allow --kick_members deny`
+        `[p]ss13verify settings permissions staffset -manage_messages=allow -kick_members=deny`
+        `[p]ss13verify settings permissions staffset --view_audit_log --manage_channels`
+        """
+        try:
+            new_perms = self._parse_permission_args(args)
+        except ValueError as e:
+            await ctx.send(f"❌ {e}")
+            return
+
+        if not new_perms:
+            await ctx.send("❌ No valid permissions provided. Use `--permission value` format.")
+            return
+
+        current_perms = await self.config.guild(ctx.guild).ticket_staff_permissions()
+        current_perms.update(new_perms)
+        await self.config.guild(ctx.guild).ticket_staff_permissions.set(current_perms)
+
+        # Build response
+        updated = []
+        for perm, value in new_perms.items():
+            value_str = self._permission_value_to_string(value)
+            updated.append(f"`{perm}`: {value_str}")
+
+        await ctx.send(f"✅ Updated staff permissions:\n{', '.join(updated)}")
+        await ctx.tick()
+
+    @permissions.command(name="staffpermlist")
+    async def list_staff_permissions(self, ctx):
+        """List all configured staff permissions for tickets."""
+        current_perms = await self.config.guild(ctx.guild).ticket_staff_permissions()
+        if not current_perms:
+            await ctx.send("❌ No staff permissions configured for tickets.")
+            return
+
+        embed = discord.Embed(
+            title="Staff Ticket Permissions",
+            color=await ctx.embed_color(),
+            description="These permissions apply to staff roles in verification tickets."
+        )
+
+        perm_text = ""
+        for perm, value in current_perms.items():
+            value_str = self._permission_value_to_string(value)
+            perm_text += f"**{perm}**: {value_str}\n"
+
+        embed.add_field(name="Permissions", value=perm_text, inline=False)
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="openerupdate")
+    async def set_opener_permission(self, ctx, *, args: str):
+        """
+        Set permissions for ticket openers in their tickets using command-line style arguments.
+
+        Supports multiple formats:
+        --permission value --permission2 value2
+        --permission=value --permission2=value2
+        -permission value -permission2 value2
+        -permission=value -permission2=value2
+
+        Values: allow, deny, or passthrough
+        If no value is specified, defaults to 'allow'
+
+        Examples:
+        `[p]ss13verify settings permissions openerupdate --attach_files allow --embed_links deny`
+        `[p]ss13verify settings permissions openerupdate -attach_files=allow -embed_links=deny`
+        `[p]ss13verify settings permissions openerupdate --add_reactions --use_external_emojis`
+        """
+        try:
+            new_perms = self._parse_permission_args(args)
+        except ValueError as e:
+            await ctx.send(f"❌ {e}")
+            return
+
+        if not new_perms:
+            await ctx.send("❌ No valid permissions provided. Use `--permission value` format.")
+            return
+
+        current_perms = await self.config.guild(ctx.guild).ticket_opener_permissions()
+        current_perms.update(new_perms)
+        await self.config.guild(ctx.guild).ticket_opener_permissions.set(current_perms)
+
+        # Build response
+        updated = []
+        for perm, value in new_perms.items():
+            value_str = self._permission_value_to_string(value)
+            updated.append(f"`{perm}`: {value_str}")
+
+        await ctx.send(f"✅ Updated opener permissions:\n{', '.join(updated)}")
+        await ctx.tick()
+
+    @permissions.command(name="openerlist")
+    async def list_opener_permissions(self, ctx):
+        """List all configured opener permissions for tickets."""
+        current_perms = await self.config.guild(ctx.guild).ticket_opener_permissions()
+        if not current_perms:
+            await ctx.send("❌ No opener permissions configured for tickets.")
+            return
+
+        embed = discord.Embed(
+            title="Ticket Opener Permissions",
+            color=await ctx.embed_color(),
+            description="These permissions apply to users who open verification tickets."
+        )
+
+        perm_text = ""
+        for perm, value in current_perms.items():
+            value_str = self._permission_value_to_string(value)
+            perm_text += f"**{perm}**: {value_str}\n"
+
+        embed.add_field(name="Permissions", value=perm_text, inline=False)
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="reset")
+    async def reset_permissions(self, ctx):
+        """Reset all ticket permission configurations to default."""
+        await self.config.guild(ctx.guild).ticket_default_permissions.set({})
+        await self.config.guild(ctx.guild).ticket_staff_roles.set([])
+        await self.config.guild(ctx.guild).ticket_staff_permissions.set({})
+        await self.config.guild(ctx.guild).ticket_opener_permissions.set({})
+        await ctx.send("✅ All ticket permission configurations have been reset to default.")
+        await ctx.tick()
+
+    @permissions.command(name="listall")
+    async def list_all_permissions(self, ctx):
+        """List all available Discord permissions."""
+        perms = self._get_all_discord_permissions()
+        chunks = [perms[i:i+10] for i in range(0, len(perms), 10)]
+
+        embed = discord.Embed(
+            title="Available Discord Permissions",
+            color=await ctx.embed_color(),
+            description="These are all the Discord permissions you can configure for tickets."
+        )
+
+        for i, chunk in enumerate(chunks, 1):
+            perm_text = "\n".join([f"• {perm}" for perm in chunk])
+            embed.add_field(name=f"Permissions ({i})", value=perm_text, inline=True)
+
+        embed.set_footer(text="Use values: allow, deny, or passthrough")
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="testparse")
+    async def test_parse_args(self, ctx, *, args: str):
+        """
+        Test the argument parsing functionality.
+
+        This command shows how your arguments would be parsed without actually changing any settings.
+
+        Example: `[p]ss13verify settings permissions testparse --view_channel deny --send_messages=allow -embed_links`
+        """
+        try:
+            parsed = self._parse_permission_args(args)
+            if not parsed:
+                await ctx.send("❌ No valid permissions found in the arguments.")
+                return
+
+            embed = discord.Embed(
+                title="Parsed Arguments",
+                color=await ctx.embed_color(),
+                description="Here's how your arguments would be interpreted:"
+            )
+
+            perm_text = ""
+            for perm, value in parsed.items():
+                value_str = self._permission_value_to_string(value)
+                perm_text += f"**{perm}**: {value_str}\n"
+
+            embed.add_field(name="Permissions", value=perm_text, inline=False)
+            embed.set_footer(text="Use this to verify your syntax before applying changes")
+            await ctx.send(embed=embed)
+
+        except ValueError as e:
+            await ctx.send(f"❌ Parse error: {e}")
+
+    @permissions.command(name="help")
+    async def permission_help(self, ctx):
+        """Show detailed help for the permission system."""
+        embed = discord.Embed(
+            title="SS13Verify Permission System Help",
+            color=await ctx.embed_color(),
+            description="Configure fine-grained permissions for verification tickets."
+        )
+
+        embed.add_field(
+            name="🎯 Command-Line Style Arguments",
+            value=(
+                "All permission commands support flexible argument formats:\n"
+                "`--permission value` - Long form with space\n"
+                "`--permission=value` - Long form with equals\n"
+                "`-permission value` - Short form with space\n"
+                "`-permission=value` - Short form with equals\n"
+                "You can mix and match these formats in one command!"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="✅ Permission Values",
+            value=(
+                "`allow` / `true` / `yes` / `1` - ✅ Grant permission\n"
+                "`deny` / `false` / `no` / `0` - ❌ Deny permission\n"
+                "`passthrough` / `neutral` / `none` / `null` - ➡️ Use Discord default\n"
+                "\nIf no value is specified, defaults to `allow`"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="📝 Example Commands",
+            value=(
+                "`defaultset --view_channel deny --send_messages allow`\n"
+                "`staffset -manage_messages=allow -kick_members=deny --view_audit_log`\n"
+                "`openerupdate --embed_links --attach_files deny --add_reactions=allow`\n"
+                "`testparse --view_channel deny --send_messages` (test syntax)"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="🔧 Quick Setup",
+            value=(
+                "1. `listall` - See all available permissions\n"
+                "2. `staffadd @Role` - Add staff roles\n"
+                "3. `defaultset --view_channel deny` - Hide from @everyone\n"
+                "4. `staffset --view_channel allow --manage_messages allow` - Staff access\n"
+                "5. `openerupdate --attach_files allow` - Let users attach files"
+            ),
+            inline=False
+        )
+
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="defaultshow")
+    async def show_default_permissions_cmdline(self, ctx):
+        """Show current default permissions in command-line format for easy copying."""
+        current_perms = await self.config.guild(ctx.guild).ticket_default_permissions()
+
+        if not current_perms:
+            await ctx.send("❌ No default permissions configured for @everyone in tickets.")
+            return
+
+        # Build command-line format
+        args = []
+        for perm, value in current_perms.items():
+            value_str = self._permission_value_to_string(value).lower()
+            args.append(f"--{perm} {value_str}")
+
+        cmdline = " ".join(args)
+
+        embed = discord.Embed(
+            title="Default Permissions (Command-Line Format)",
+            color=await ctx.embed_color(),
+            description="Current @everyone permissions in command-line format:"
+        )
+
+        # Split into chunks if too long for Discord
+        if len(cmdline) > 1024:
+            chunks = [cmdline[i:i+1000] for i in range(0, len(cmdline), 1000)]
+            for i, chunk in enumerate(chunks, 1):
+                embed.add_field(
+                    name=f"Arguments ({i})" if len(chunks) > 1 else "Arguments",
+                    value=f"```\n{chunk}\n```",
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="Arguments",
+                value=f"```\n{cmdline}\n```",
+                inline=False
+            )
+
+        embed.set_footer(text="Copy and paste these arguments to replicate the configuration")
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="staffshow")
+    async def show_staff_permissions_cmdline(self, ctx):
+        """Show current staff permissions in command-line format for easy copying."""
+        current_perms = await self.config.guild(ctx.guild).ticket_staff_permissions()
+
+        if not current_perms:
+            await ctx.send("❌ No staff permissions configured for tickets.")
+            return
+
+        # Build command-line format
+        args = []
+        for perm, value in current_perms.items():
+            value_str = self._permission_value_to_string(value).lower()
+            args.append(f"--{perm} {value_str}")
+
+        cmdline = " ".join(args)
+
+        embed = discord.Embed(
+            title="Staff Permissions (Command-Line Format)",
+            color=await ctx.embed_color(),
+            description="Current staff permissions in command-line format:"
+        )
+
+        # Split into chunks if too long for Discord
+        if len(cmdline) > 1024:
+            chunks = [cmdline[i:i+1000] for i in range(0, len(cmdline), 1000)]
+            for i, chunk in enumerate(chunks, 1):
+                embed.add_field(
+                    name=f"Arguments ({i})" if len(chunks) > 1 else "Arguments",
+                    value=f"```\n{chunk}\n```",
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="Arguments",
+                value=f"```\n{cmdline}\n```",
+                inline=False
+            )
+
+        embed.set_footer(text="Copy and paste these arguments to replicate the configuration")
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="openershow")
+    async def show_opener_permissions_cmdline(self, ctx):
+        """Show current opener permissions in command-line format for easy copying."""
+        current_perms = await self.config.guild(ctx.guild).ticket_opener_permissions()
+
+        if not current_perms:
+            await ctx.send("❌ No opener permissions configured for tickets.")
+            return
+
+        # Build command-line format
+        args = []
+        for perm, value in current_perms.items():
+            value_str = self._permission_value_to_string(value).lower()
+            args.append(f"--{perm} {value_str}")
+
+        cmdline = " ".join(args)
+
+        embed = discord.Embed(
+            title="Opener Permissions (Command-Line Format)",
+            color=await ctx.embed_color(),
+            description="Current opener permissions in command-line format:"
+        )
+
+        # Split into chunks if too long for Discord
+        if len(cmdline) > 1024:
+            chunks = [cmdline[i:i+1000] for i in range(0, len(cmdline), 1000)]
+            for i, chunk in enumerate(chunks, 1):
+                embed.add_field(
+                    name=f"Arguments ({i})" if len(chunks) > 1 else "Arguments",
+                    value=f"```\n{chunk}\n```",
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="Arguments",
+                value=f"```\n{cmdline}\n```",
+                inline=False
+            )
+
+        embed.set_footer(text="Copy and paste these arguments to replicate the configuration")
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="options")
+    async def show_available_options(self, ctx):
+        """Show all available permission options in command-line format."""
+        perms = self._get_all_discord_permissions()
+
+        embed = discord.Embed(
+            title="Available Permission Options",
+            color=await ctx.embed_color(),
+            description="All available Discord permissions you can configure with --option format:"
+        )
+
+        # Create command-line format list
+        options = [f"--{perm}" for perm in perms]
+
+        # Split into chunks for display
+        chunks = [options[i:i+15] for i in range(0, len(options), 15)]
+
+        for i, chunk in enumerate(chunks, 1):
+            option_text = " ".join(chunk)
+            # Split further if still too long
+            if len(option_text) > 1024:
+                # Split by spaces into smaller chunks
+                words = chunk
+                sub_chunks = []
+                current_chunk = []
+                current_length = 0
+
+                for word in words:
+                    if current_length + len(word) + 1 > 1000:  # +1 for space
+                        sub_chunks.append(" ".join(current_chunk))
+                        current_chunk = [word]
+                        current_length = len(word)
+                    else:
+                        current_chunk.append(word)
+                        current_length += len(word) + 1
+
+                if current_chunk:
+                    sub_chunks.append(" ".join(current_chunk))
+
+                for j, sub_chunk in enumerate(sub_chunks):
+                    field_name = f"Options ({i}.{j+1})" if len(sub_chunks) > 1 else f"Options ({i})"
+                    embed.add_field(
+                        name=field_name,
+                        value=f"```\n{sub_chunk}\n```",
+                        inline=False
+                    )
+            else:
+                embed.add_field(
+                    name=f"Options ({i})",
+                    value=f"```\n{option_text}\n```",
+                    inline=False
+                )
+
+        embed.add_field(
+            name="💡 Usage",
+            value=(
+                "Use these options with permission commands:\n"
+                "`defaultset --view_channel deny --send_messages allow`\n"
+                "`staffset --manage_messages allow --kick_members deny`\n"
+                "\nValues: allow, deny, passthrough"
+            ),
+            inline=False
+        )
+
+        await ctx.send(embed=embed)
+
+    @permissions.command(name="showall")
+    async def show_all_permissions_cmdline(self, ctx):
+        """Show all current permission configurations in command-line format."""
+        conf = await self.config.guild(ctx.guild).all()
+
+        embed = discord.Embed(
+            title="All Permission Configurations (Command-Line Format)",
+            color=await ctx.embed_color(),
+            description="All current permission settings in command-line format for easy copying:"
+        )
+
+        # Default permissions
+        default_perms = conf["ticket_default_permissions"]
+        if default_perms:
+            args = []
+            for perm, value in default_perms.items():
+                value_str = self._permission_value_to_string(value).lower()
+                args.append(f"--{perm} {value_str}")
+
+            cmdline = " ".join(args)
+            embed.add_field(
+                name="🌐 Default Permissions (@everyone)",
+                value=f"```defaultset {cmdline}```",
+                inline=False
+            )
+
+        # Staff permissions
+        staff_perms = conf["ticket_staff_permissions"]
+        if staff_perms:
+            args = []
+            for perm, value in staff_perms.items():
+                value_str = self._permission_value_to_string(value).lower()
+                args.append(f"--{perm} {value_str}")
+
+            cmdline = " ".join(args)
+            embed.add_field(
+                name="👮 Staff Permissions",
+                value=f"```staffset {cmdline}```",
+                inline=False
+            )
+
+        # Opener permissions
+        opener_perms = conf["ticket_opener_permissions"]
+        if opener_perms:
+            args = []
+            for perm, value in opener_perms.items():
+                value_str = self._permission_value_to_string(value).lower()
+                args.append(f"--{perm} {value_str}")
+
+            cmdline = " ".join(args)
+            embed.add_field(
+                name="🎫 Opener Permissions",
+                value=f"```openerupdate {cmdline}```",
+                inline=False
+            )
+
+        # Staff roles
+        staff_role_ids = conf["ticket_staff_roles"]
+        if staff_role_ids:
+            roles = [ctx.guild.get_role(rid) for rid in staff_role_ids if ctx.guild.get_role(rid)]
+            if roles:
+                role_mentions = [role.mention for role in roles]
+                embed.add_field(
+                    name="👥 Staff Roles",
+                    value=f"Configured: {', '.join(role_mentions)}",
+                    inline=False
+                )
+
+        if not any([default_perms, staff_perms, opener_perms, staff_role_ids]):
+            embed.add_field(
+                name="ℹ️ No Configurations",
+                value="No permission configurations found. Use `options` to see available permissions.",
+                inline=False
+            )
+
+        embed.set_footer(text="Copy command snippets to replicate configurations")
+        await ctx.send(embed=embed)
 
     @panel.command(name="setchannel")
     async def set_panel_channel(self, ctx, channel: discord.TextChannel):
@@ -583,6 +1478,18 @@ class SS13Verify(commands.Cog):
         embed.add_field(
             name="🚫 Deverified Users",
             value=f"{deverified_count} users" if deverified_count > 0 else "None",
+            inline=True
+        )
+
+        # Permission system status
+        staff_role_count = len(conf["ticket_staff_roles"])
+        default_perm_count = len(conf["ticket_default_permissions"])
+        staff_perm_count = len(conf["ticket_staff_permissions"])
+        opener_perm_count = len(conf["ticket_opener_permissions"])
+
+        embed.add_field(
+            name="🔐 Ticket Permissions",
+            value=f"Staff Roles: {staff_role_count}\nDefault Perms: {default_perm_count}\nStaff Perms: {staff_perm_count}\nOpener Perms: {opener_perm_count}",
             inline=True
         )
 
@@ -1069,11 +1976,7 @@ class SS13Verify(commands.Cog):
 
     async def create_verification_ticket(self, interaction: discord.Interaction, user: discord.Member, category: discord.CategoryChannel, ticket_embed_data):
         guild = interaction.guild
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
-        }
+        overwrites = await self._build_ticket_overwrites(guild, user)
         channel_name = f"verify-{user.name}"
         try:
             ticket_channel = await guild.create_text_channel(
