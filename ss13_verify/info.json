@@ -7,7 +7,8 @@
     "description": "A comprehensive SS13 Discord verification system with ticket-based verification, auto-verification, role assignment, and database linking. Replaces tgverify and tgdb with modern Discord features.",
     "install_msg": "Thank you for installing SS13Verify! Use [p]ss13verify to configure the verification system. Make sure to set up your database connection and configure the verification panel.",
     "requirements": [
-        "aiomysql"
+        "aiomysql",
+        "sqlalchemy[asyncio]"
     ],
     "tags": [
         "SS13",

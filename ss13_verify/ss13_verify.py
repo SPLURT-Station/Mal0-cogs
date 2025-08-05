@@ -6,11 +6,12 @@ from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 from redbot.core.utils import chat_formatting
 from redbot.core.utils.views import SimpleMenu
-import aiomysql
 import hashlib
 import datetime
 from discord import ui
 from .helpers import normalise_to_ckey
+from .database import DatabaseManager
+from .models import DiscordLink
 
 class SS13Verify(commands.Cog):
     """
@@ -24,7 +25,7 @@ class SS13Verify(commands.Cog):
         self.bot = bot
         self.log = logging.getLogger("red.ss13_verify")
         self.config = Config.get_conf(self, identifier=908039527271104514, force_registration=True)
-        self.pools = {}  # Guild ID -> aiomysql pool mapping
+        self.db_manager = DatabaseManager()
         # Per-guild config
         default_guild = {
             "ticket_channel": None,  # Channel ID for ticket panel
@@ -65,67 +66,29 @@ class SS13Verify(commands.Cog):
                 await self.reconnect_database(guild)
 
     async def cog_unload(self):
-        # Close all database pools when cog is unloaded
-        for guild_id, pool in self.pools.items():
-            if pool:
-                try:
-                    pool.close()
-                    await pool.wait_closed()
-                    self.log.info(f"Closed database pool for guild {guild_id}")
-                except Exception as e:
-                    self.log.error(f"Error closing database pool for guild {guild_id}: {e}")
-        self.pools.clear()
+        # Close all database connections when cog is unloaded
+        await self.db_manager.disconnect_all()
 
     async def reconnect_database(self, guild):
-        """Reconnect the database pool for a guild."""
+        """Reconnect the database for a guild using SQLAlchemy."""
         conf = await self.config.guild(guild).all()
 
-        # Close existing pool for this guild if it exists
-        if guild.id in self.pools and self.pools[guild.id]:
-            try:
-                self.pools[guild.id].close()
-                await self.pools[guild.id].wait_closed()
-            except Exception as e:
-                self.log.warning(f"Error closing existing pool for guild {guild.name}: {e}")
+        success = await self.db_manager.connect_guild(
+            guild_id=guild.id,
+            host=conf["db_host"],
+            port=conf["db_port"],
+            user=conf["db_user"],
+            password=conf["db_password"],
+            database=conf["db_name"],
+            prefix=conf["mysql_prefix"] or ""
+        )
 
-        try:
-            pool = await aiomysql.create_pool(
-                host=conf["db_host"],
-                port=conf["db_port"],
-                user=conf["db_user"],
-                password=conf["db_password"],
-                db=conf["db_name"],
-                autocommit=True,
-                minsize=1,
-                maxsize=5,
-                charset="utf8mb4"
-            )
-            self.pools[guild.id] = pool
+        if success:
             self.log.info(f"Connected to database for guild {guild.name} ({guild.id})")
-        except Exception as e:
-            self.pools[guild.id] = None
-            self.log.error(f"Failed to connect to database for guild {guild.name} ({guild.id}): {e}")
+        else:
+            self.log.error(f"Failed to connect to database for guild {guild.name} ({guild.id})")
 
-    async def query_database(self, guild, query, parameters=None):
-        """Run a query using the guild-specific pool."""
-        pool = self.pools.get(guild.id) if guild else None
-        if not pool:
-            raise RuntimeError(f"Database is not connected for guild {guild.name if guild else 'Unknown'} ({guild.id if guild else 'Unknown'})")
 
-        self.log.info(f"Executing query for guild {guild.name}: {query} with parameters: {parameters}")
-
-        async with pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(query, parameters or [])
-                if query.strip().lower().startswith("select"):
-                    result = await cur.fetchall()
-                    self.log.info(f"Query returned {len(result)} rows: {result}")
-                    return result
-                else:
-                    await conn.commit()
-                    rowcount = cur.rowcount
-                    self.log.info(f"Query affected {rowcount} rows")
-                    return rowcount
 
     def _get_all_discord_permissions(self):
         """Get a list of all available Discord permissions."""
@@ -1392,27 +1355,24 @@ class SS13Verify(commands.Cog):
         This command will check all verified users in the database and invalidate
         those who are no longer members of this Discord server.
         """
-        if not self.pool:
-            await ctx.send("❌ Database is not connected.")
-            return
-
         async with ctx.typing():
             try:
-                prefix = await self.config.guild(ctx.guild).mysql_prefix()
-                # Get all valid links for this server (we need to filter by members in this guild)
-                query = f"SELECT * FROM {prefix}discord_links WHERE discord_id IS NOT NULL AND valid = 1"
-                results = await self.query_database(ctx.guild, query)
+                if not self.db_manager.is_connected(ctx.guild.id):
+                    await ctx.send("❌ Database is not connected. Please configure the database connection first.")
+                    return
+
+                # Get all valid links for this server
+                links = await self.db_manager.get_all_valid_links(ctx.guild.id)
 
                 invalidated_count = 0
-                for link in results:
-                    discord_id = link["discord_id"]
+                for link in links:
+                    discord_id = link.discord_id
                     member = ctx.guild.get_member(discord_id)
                     if not member:  # User is no longer in the server
                         # Invalidate their link
-                        update_query = f"UPDATE {prefix}discord_links SET valid = 0 WHERE discord_id = %s AND valid = 1"
-                        await self.query_database(ctx.guild, update_query, [discord_id])
-                        invalidated_count += 1
-                        self.log.info(f"Invalidated verification link for user {discord_id} (ckey: {link['ckey']}) who left {ctx.guild.name}")
+                        count = await self.db_manager.invalidate_links_by_discord_id(ctx.guild.id, discord_id)
+                        invalidated_count += count
+                        self.log.info(f"Invalidated verification link for user {discord_id} (ckey: {link.ckey}) who left {ctx.guild.name}")
 
                 await ctx.send(f"✅ **{invalidated_count}** verification links have been invalidated for users who left the server.")
                 await ctx.tick()
@@ -1530,15 +1490,11 @@ class SS13Verify(commands.Cog):
     @ss13verify.command()
     async def checkuser(self, ctx, user: discord.Member):
         """Check the verification status of a user."""
-        if not self.pool:
-            await ctx.send("❌ Database is not connected.")
-            return
-
         try:
             # Check for valid links
-            prefix = await self.config.guild(ctx.guild).mysql_prefix()
-            query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s AND valid = 1 ORDER BY timestamp DESC LIMIT 1"
-            results = await self.query_database(ctx.guild, query, [user.id])
+            link = None
+            if self.db_manager.is_connected(ctx.guild.id):
+                link = await self.db_manager.get_valid_link_by_discord_id(ctx.guild.id, user.id)
 
             embed = discord.Embed(
                 title=f"Verification Status: {user.display_name}",
@@ -1550,12 +1506,11 @@ class SS13Verify(commands.Cog):
             deverified_users = await self.config.guild(ctx.guild).deverified_users()
             is_deverified = user.id in deverified_users
 
-            if results:
-                link = results[0]
+            if link:
                 embed.color = discord.Color.green()
                 embed.add_field(name="Status", value="✅ Verified", inline=True)
-                embed.add_field(name="Ckey", value=f"`{link['ckey']}`", inline=True)
-                embed.add_field(name="Linked Since", value=f"<t:{int(link['timestamp'].timestamp())}:R>", inline=True)
+                embed.add_field(name="Ckey", value=f"`{link.ckey}`", inline=True)
+                embed.add_field(name="Linked Since", value=f"<t:{int(link.timestamp.timestamp())}:R>", inline=True)
 
                 # Check if user has verification roles
                 role_ids = await self.config.guild(ctx.guild).verification_roles()
@@ -1594,16 +1549,14 @@ class SS13Verify(commands.Cog):
     @ss13verify.command()
     async def ckeys(self, ctx, user: discord.Member):
         """List all past ckeys this Discord user has verified with."""
-        if not self.pool:
+        if not self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("❌ Database is not connected.")
             return
 
         message = await ctx.send("Collecting ckeys for Discord user...")
         async with ctx.typing():
             try:
-                prefix = await self.config.guild(ctx.guild).mysql_prefix()
-                query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s ORDER BY timestamp DESC"
-                results = await self.query_database(ctx.guild, query, [user.id])
+                links = await self.db_manager.get_all_links_by_discord_id(ctx.guild.id, user.id)
 
                 embed = discord.Embed(color=await ctx.embed_color())
                 embed.set_author(
@@ -1611,7 +1564,7 @@ class SS13Verify(commands.Cog):
                 )
                 embed.set_thumbnail(url=user.display_avatar.url)
 
-                if len(results) <= 0:
+                if len(links) <= 0:
                     return await message.edit(
                         content="No ckeys found for this Discord user", embed=None
                     )
@@ -1621,10 +1574,10 @@ class SS13Verify(commands.Cog):
                 is_deverified = user.id in deverified_users
 
                 names = ""
-                for link in results:
-                    validity_text = "✅ Valid" if link['valid'] else "❌ Invalid"
-                    timestamp = link['timestamp']
-                    names += f"Ckey `{link['ckey']}` linked on <t:{int(timestamp.timestamp())}:f>, status: {validity_text}\n"
+                for link in links:
+                    validity_text = "✅ Valid" if link.valid else "❌ Invalid"
+                    timestamp = link.timestamp
+                    names += f"Ckey `{link.ckey}` linked on <t:{int(timestamp.timestamp())}:f>, status: {validity_text}\n"
 
                 if len(names) > 1024:  # Discord embed field limit
                     # Split into multiple fields if too long
@@ -1662,7 +1615,7 @@ class SS13Verify(commands.Cog):
     @ss13verify.command()
     async def discords(self, ctx, ckey: str):
         """List all past Discord accounts this ckey has verified with."""
-        if not self.pool:
+        if not self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("❌ Database is not connected.")
             return
 
@@ -1670,25 +1623,23 @@ class SS13Verify(commands.Cog):
         message = await ctx.send("Collecting Discord accounts for ckey...")
         async with ctx.typing():
             try:
-                prefix = await self.config.guild(ctx.guild).mysql_prefix()
-                query = f"SELECT * FROM {prefix}discord_links WHERE ckey = %s ORDER BY timestamp DESC"
-                results = await self.query_database(ctx.guild, query, [ckey])
+                links = await self.db_manager.get_all_links_by_ckey(ctx.guild.id, ckey)
 
                 embed = discord.Embed(color=await ctx.embed_color())
                 embed.set_author(
                     name=f"Discord accounts historically linked to {str(ckey).title()}"
                 )
 
-                if len(results) <= 0:
+                if len(links) <= 0:
                     return await message.edit(
                         content="No Discord accounts found for this ckey", embed=None
                     )
 
                 names = ""
-                for link in results:
-                    validity_text = "✅ Valid" if link['valid'] else "❌ Invalid"
-                    timestamp = link['timestamp']
-                    discord_id = link['discord_id']
+                for link in links:
+                    validity_text = "✅ Valid" if link.valid else "❌ Invalid"
+                    timestamp = link.timestamp
+                    discord_id = link.discord_id
                     if discord_id:
                         names += f"User <@{discord_id}> linked on <t:{int(timestamp.timestamp())}:f>, status: {validity_text}\n"
                     else:
@@ -1775,30 +1726,28 @@ class SS13Verify(commands.Cog):
 
     async def fetch_latest_discord_link(self, guild, discord_id):
         """Fetch the latest discord_links entry for a discord_id, ordered by timestamp desc."""
-        prefix = await self.config.guild(guild).mysql_prefix()
-        query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s ORDER BY timestamp DESC LIMIT 1"
-        results = await self.query_database(guild, query, [discord_id])
-        return results[0] if results else None
+        if not self.db_manager.is_connected(guild.id):
+            return None
+
+        try:
+            link = await self.db_manager.get_latest_link_by_discord_id(guild.id, discord_id)
+            return link.to_dict() if link else None
+        except Exception as e:
+            self.log.error(f"Error fetching latest link for user {discord_id} in guild {guild.name}: {e}")
+            return None
 
     async def fetch_valid_discord_link(self, guild, discord_id):
         """Fetch the latest valid discord link for a user."""
-        self.log.info(f"Checking for valid discord link for user {discord_id} in guild {guild.name}")
-
-        pool = self.pools.get(guild.id) if guild else None
-        if not pool:
-            self.log.warning(f"Database pool not available when checking valid link for user {discord_id} in guild {guild.name}")
+        if not self.db_manager.is_connected(guild.id):
+            self.log.warning(f"Database not connected for guild {guild.name} when checking valid link for user {discord_id}")
             return None
 
-        prefix = await self.config.guild(guild).mysql_prefix()
-        query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s AND valid = 1 ORDER BY timestamp DESC LIMIT 1"
-        results = await self.query_database(guild, query, [discord_id])
-
-        if results:
-            self.log.info(f"Found valid link for user {discord_id}: {results[0]}")
-        else:
-            self.log.info(f"No valid link found for user {discord_id}")
-
-        return results[0] if results else None
+        try:
+            link = await self.db_manager.get_valid_link_by_discord_id(guild.id, discord_id)
+            return link.to_dict() if link else None
+        except Exception as e:
+            self.log.error(f"Error fetching valid link for user {discord_id} in guild {guild.name}: {e}")
+            return None
 
     async def is_user_verified(self, guild, user):
         """Check if a user is already verified with a valid link."""
@@ -1843,12 +1792,24 @@ class SS13Verify(commands.Cog):
 
     async def create_auto_link(self, guild, ckey, discord_id, original_token):
         """Create a new valid discord_links entry for auto-verification."""
-        prefix = await self.config.guild(guild).mysql_prefix()
+        if not self.db_manager.is_connected(guild.id):
+            raise RuntimeError(f"Database not connected for guild {guild.name}")
+
         now = datetime.datetime.utcnow()
         new_token = self.generate_auto_token(original_token, now)
-        query = f"INSERT INTO {prefix}discord_links (ckey, discord_id, timestamp, one_time_token, valid) VALUES (%s, %s, %s, %s, 1)"
-        await self.query_database(guild, query, [ckey, discord_id, now, new_token])
-        return new_token
+
+        try:
+            await self.db_manager.create_link(
+                guild_id=guild.id,
+                ckey=ckey,
+                discord_id=discord_id,
+                one_time_token=new_token,
+                valid=True
+            )
+            return new_token
+        except Exception as e:
+            self.log.error(f"Error creating auto link for {ckey} and discord_id {discord_id}: {e}")
+            raise
 
     async def try_auto_verification(self, guild, user, channel=None, dm=False):
         """Attempt to auto-verify a user based on previous discord_links.
@@ -1983,9 +1944,9 @@ class SS13Verify(commands.Cog):
         """Perform the actual deverification process."""
         try:
             # Invalidate all valid links for the user in the database
-            prefix = await self.config.guild(guild).mysql_prefix()
-            query = f"UPDATE {prefix}discord_links SET valid = 0 WHERE discord_id = %s AND valid = 1"
-            affected_rows = await self.query_database(guild, query, [target_user.id])
+            affected_rows = 0
+            if self.db_manager.is_connected(guild.id):
+                affected_rows = await self.db_manager.invalidate_links_by_discord_id(guild.id, target_user.id)
 
             # Add user to deverified list
             deverified_users = await self.config.guild(guild).deverified_users()
@@ -2071,17 +2032,18 @@ class SS13Verify(commands.Cog):
 
     async def verify_code(self, guild, user, code):
         """Check if the code matches a valid, unlinked one_time_token in the database."""
-        prefix = await self.config.guild(guild).mysql_prefix()
-        # Find a link with this code, valid=0, and discord_id is null or matches user
-        query = f"SELECT * FROM {prefix}discord_links WHERE one_time_token = %s AND valid = 0 AND (discord_id IS NULL OR discord_id = %s) ORDER BY timestamp DESC LIMIT 1"
-        results = await self.query_database(guild, query, [code, user.id])
-        if not results:
+        if not self.db_manager.is_connected(guild.id):
             return False, None
-        link = results[0]
-        # Mark as valid and set discord_id
-        update = f"UPDATE {prefix}discord_links SET valid = 1, discord_id = %s WHERE id = %s"
-        await self.query_database(guild, update, [user.id, link["id"]])
-        return True, link["ckey"]
+
+        try:
+            link = await self.db_manager.verify_code(guild.id, code, user.id)
+            if link:
+                return True, link.ckey
+            else:
+                return False, None
+        except Exception as e:
+            self.log.error(f"Error verifying code for user {user} in guild {guild.name}: {e}")
+            return False, None
 
     async def create_verification_ticket(self, interaction: discord.Interaction, user: discord.Member, category: discord.CategoryChannel, ticket_embed_data):
         guild = interaction.guild
@@ -2211,11 +2173,9 @@ class SS13Verify(commands.Cog):
 
         # Invalidate verification if enabled and database is connected
         invalidate_enabled = await self.config.guild(guild).invalidate_on_leave()
-        if invalidate_enabled and self.pool:
+        if invalidate_enabled and self.db_manager.is_connected(guild.id):
             try:
-                prefix = await self.config.guild(guild).mysql_prefix()
-                query = f"UPDATE {prefix}discord_links SET valid = 0 WHERE discord_id = %s AND valid = 1"
-                affected_rows = await self.query_database(guild, query, [member.id])
+                affected_rows = await self.db_manager.invalidate_links_by_discord_id(guild.id, member.id)
                 if affected_rows > 0:
                     self.log.info(f"Invalidated {affected_rows} verification link(s) for {member} ({member.id}) who left {guild.name}")
             except Exception as e:
