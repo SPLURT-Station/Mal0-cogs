@@ -1815,7 +1815,9 @@ class SS13Verify(commands.Cog):
         Returns (success: bool, ckey: str or None)
         """
         # First check if user is already verified
-        if await self.is_user_verified(guild, user):
+        is_verified = await self.is_user_verified(guild, user)
+        if is_verified:
+            self.log.info(f"User {user} is already verified, skipping auto-verification")
             # User already has a valid link, just ensure they have roles
             await self.ensure_user_roles(guild, user)
 
@@ -2087,7 +2089,8 @@ class SS13Verify(commands.Cog):
             return
 
         # Check if user is already verified
-        if await self.is_user_verified(guild, user):
+        is_verified = await self.is_user_verified(guild, user)
+        if is_verified:
             # Ensure they have the correct roles
             await self.ensure_user_roles(guild, user)
 
