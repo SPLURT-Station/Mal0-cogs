@@ -88,14 +88,21 @@ class SS13Verify(commands.Cog):
         """Run a query using the current pool."""
         if not self.pool:
             raise RuntimeError("Database is not connected.")
+
+        self.log.debug(f"Executing query: {query} with parameters: {parameters}")
+
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, parameters or [])
                 if query.strip().lower().startswith("select"):
-                    return await cur.fetchall()
+                    result = await cur.fetchall()
+                    self.log.debug(f"Query returned {len(result)} rows: {result}")
+                    return result
                 else:
                     await conn.commit()
-                    return cur.rowcount
+                    rowcount = cur.rowcount
+                    self.log.debug(f"Query affected {rowcount} rows")
+                    return rowcount
 
     def _get_all_discord_permissions(self):
         """Get a list of all available Discord permissions."""
