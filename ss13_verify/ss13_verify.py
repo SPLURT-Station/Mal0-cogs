@@ -436,7 +436,7 @@ class SS13Verify(commands.Cog):
         Example: `[p]ss13verify settings database reconnect`
         """
         await self.reconnect_database(ctx.guild)
-        if self.pool:
+        if self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("✅ Database reconnected successfully.")
             await ctx.tick()
         else:
@@ -1406,7 +1406,7 @@ class SS13Verify(commands.Cog):
 
         embed.add_field(
             name="🗄️ Database",
-            value=f"{db_status}\nConnected: {'✅ Yes' if self.pool else '❌ No'}",
+            value=f"{db_status}\nConnected: {'✅ Yes' if self.db_manager.is_connected(ctx.guild.id) else '❌ No'}",
             inline=True
         )
 
@@ -1690,7 +1690,7 @@ class SS13Verify(commands.Cog):
                 return
 
         # Check if database is connected
-        if not self.pool:
+        if not self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("❌ Database is not connected.")
             return
 
