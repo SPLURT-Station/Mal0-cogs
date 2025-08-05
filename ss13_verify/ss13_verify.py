@@ -1214,13 +1214,14 @@ class SS13Verify(commands.Cog):
             embed_dict = json.loads(file_text)
             embed = discord.Embed.from_dict(embed_dict)
             await self.config.guild(ctx.guild).panel_embed.set(embed_dict)
-            await ctx.send("✅ Panel embed set successfully!")
             await ctx.send("**Preview:**", embed=embed)
-            await ctx.tick()
         except json.JSONDecodeError:
             await ctx.send("❌ Invalid JSON format in the attached file.")
         except Exception as e:
             await ctx.send(f"❌ Error creating embed: {str(e)}")
+        else:
+            await ctx.send("✅ Panel embed set successfully!")
+            await ctx.tick()
 
     @panel.command(name="setticketembed")
     async def set_ticket_embed(self, ctx):
@@ -1238,13 +1239,14 @@ class SS13Verify(commands.Cog):
             embed_dict = json.loads(file_text)
             embed = discord.Embed.from_dict(embed_dict)
             await self.config.guild(ctx.guild).ticket_embed.set(embed_dict)
-            await ctx.send("✅ Ticket embed set successfully!")
-            await ctx.send("**Preview:**", embed=embed)
             await ctx.tick()
         except json.JSONDecodeError:
             await ctx.send("❌ Invalid JSON format in the attached file.")
         except Exception as e:
             await ctx.send(f"❌ Error creating embed: {str(e)}")
+        else:
+            await ctx.send("✅ Ticket embed set successfully!")
+            await ctx.send("**Preview:**", embed=embed)
 
     @panel.command(name="create")
     async def create_panel(self, ctx):
@@ -1748,6 +1750,44 @@ class SS13Verify(commands.Cog):
         results = await self.query_database(query, [discord_id])
         return results[0] if results else None
 
+    async def fetch_valid_discord_link(self, guild, discord_id):
+        """Fetch the latest valid discord link for a user."""
+        prefix = await self.config.guild(guild).mysql_prefix()
+        query = f"SELECT * FROM {prefix}discord_links WHERE discord_id = %s AND valid = 1 ORDER BY timestamp DESC LIMIT 1"
+        results = await self.query_database(query, [discord_id])
+        return results[0] if results else None
+
+    async def is_user_verified(self, guild, user):
+        """Check if a user is already verified with a valid link."""
+        try:
+            valid_link = await self.fetch_valid_discord_link(guild, user.id)
+            return valid_link is not None
+        except Exception:
+            return False
+
+    async def ensure_user_roles(self, guild, user):
+        """Ensure a verified user has the correct roles."""
+        try:
+            verification_roles = await self.config.guild(guild).verification_roles()
+            if not verification_roles:
+                return
+
+            member = guild.get_member(user.id)
+            if not member:
+                return
+
+            roles_to_add = []
+            for role_id in verification_roles:
+                role = guild.get_role(role_id)
+                if role and role not in member.roles:
+                    roles_to_add.append(role)
+
+            if roles_to_add:
+                await member.add_roles(*roles_to_add, reason="Ensuring verified user has correct roles")
+                self.log.info(f"Added missing verification roles to {member} in {guild}")
+        except Exception as e:
+            self.log.error(f"Error ensuring roles for {user} in {guild}: {e}")
+
     def generate_auto_token(self, original_token, dt):
         """Generate a new one_time_token for auto-verification based on the original token and datetime."""
         hash_input = f"{original_token}:{dt.isoformat()}"
@@ -1767,6 +1807,30 @@ class SS13Verify(commands.Cog):
         If channel is provided, send messages there. If dm=True, send DMs to the user.
         Returns (success: bool, ckey: str or None)
         """
+        # First check if user is already verified
+        if await self.is_user_verified(guild, user):
+            # User already has a valid link, just ensure they have roles
+            await self.ensure_user_roles(guild, user)
+
+            # Get their ckey for the message
+            try:
+                valid_link = await self.fetch_valid_discord_link(guild, user.id)
+                ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
+
+                if channel:
+                    await channel.send(f"You are already verified as `{ckey}`. Your roles have been updated if needed.")
+                elif dm:
+                    try:
+                        dm_channel = user.dm_channel or await user.create_dm()
+                        await dm_channel.send(f"You are already verified as `{ckey}`. Your roles have been updated if needed.")
+                    except Exception as e:
+                        self.log.error(f"Failed to send DM to already verified user {user}: {e}")
+
+                return True, ckey
+            except Exception as e:
+                self.log.error(f"Error handling already verified user {user}: {e}")
+                return False, None
+
         # Check if auto-verification is enabled
         autoverification_enabled = await self.config.guild(guild).autoverification_enabled()
 
@@ -1851,13 +1915,8 @@ class SS13Verify(commands.Cog):
             deverified_users.remove(user.id)
             await self.config.guild(guild).deverified_users.set(deverified_users)
 
-        # Assign roles
-        role_ids = await self.config.guild(guild).verification_roles()
-        roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
-        try:
-            await user.add_roles(*roles, reason="SS13 verification successful")
-        except Exception as e:
-            self.log.warning(f"Failed to assign roles to {user}: {e}")
+        # Assign roles using the helper function
+        await self.ensure_user_roles(guild, user)
         # Send confirmation
         msg = f"Verification completed! Welcome, `{ckey}`."
         if ticket_channel:
@@ -2018,6 +2077,27 @@ class SS13Verify(commands.Cog):
                 "❌ Verification system is currently disabled. Please contact an administrator.",
                 ephemeral=True
             )
+            return
+
+        # Check if user is already verified
+        if await self.is_user_verified(guild, user):
+            # Ensure they have the correct roles
+            await self.ensure_user_roles(guild, user)
+
+            # Get their ckey for the message
+            try:
+                valid_link = await self.fetch_valid_discord_link(guild, user.id)
+                ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
+                await interaction.response.send_message(
+                    f"✅ You are already verified as `{ckey}`. Your roles have been updated if needed.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                self.log.error(f"Error fetching ckey for already verified user {user}: {e}")
+                await interaction.response.send_message(
+                    "✅ You are already verified. Your roles have been updated if needed.",
+                    ephemeral=True
+                )
             return
 
         # Check if user already has an open ticket
