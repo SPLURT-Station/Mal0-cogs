@@ -1862,11 +1862,8 @@ class SS13Verify(commands.Cog):
                 if channel:
                     await channel.send(f"You are already verified as `{ckey}`. Your roles have been updated if needed.")
                 elif dm:
-                    try:
-                        dm_channel = user.dm_channel or await user.create_dm()
-                        await dm_channel.send(f"You are already verified as `{ckey}`. Your roles have been updated if needed.")
-                    except Exception as e:
-                        self.log.error(f"Failed to send DM to already verified user {user}: {e}")
+                    # For DMs, just send the success embed directly since they're already verified
+                    await self.send_verification_success_dm(guild, user, ckey)
 
                 return True, ckey
             except Exception as e:
@@ -1909,7 +1906,8 @@ class SS13Verify(commands.Cog):
                     ckey = link["ckey"]
                     original_token = link["one_time_token"]
                     new_token = await self.create_auto_link(guild, ckey, user.id, original_token)
-                    # Don't send completion message here - let finish_verification handle it
+                    # Delete the "attempting" message since finish_verification will send the success DM embed
+                    await dm_message.delete()
                     if typing_ctx:
                         await typing_ctx.__aexit__(None, None, None)
                     return True, ckey
@@ -1957,9 +1955,9 @@ class SS13Verify(commands.Cog):
         # Send comprehensive DM embed to user
         await self.send_verification_success_dm(guild, user, ckey)
 
-        # Send confirmation
-        msg = f"Verification completed! Welcome, `{ckey}`."
+        # Send confirmation (only for ticket channels, not DMs since they get the embed)
         if ticket_channel:
+            msg = f"Verification completed! Welcome, `{ckey}`."
             await ticket_channel.send(msg)
             # Wait a few seconds so the user can read the success message
             await asyncio.sleep(3)
@@ -1968,8 +1966,7 @@ class SS13Verify(commands.Cog):
             except Exception:
                 pass
             await self.config.member(user).open_ticket.clear()
-        elif dm_channel:
-            await dm_channel.send(msg)
+        # For DMs, the comprehensive embed is sufficient, no need for additional message
 
     async def send_verification_success_dm(self, guild, user, ckey):
         """Send a comprehensive DM embed to the user after successful verification."""
