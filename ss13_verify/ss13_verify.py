@@ -60,19 +60,19 @@ class SS13Verify(commands.Cog):
         self.config.register_member(**default_member)
 
     async def cog_load(self):
-        # Add persistent views back to the bot so buttons work after reload
+        # First, connect to databases for all guilds with config
+        for guild in self.bot.guilds:
+            conf = await self.config.guild(guild).all()
+            if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
+                await self.reconnect_database(guild)
+
+        # Then add persistent views back to the bot so buttons work after reload
         try:
             self.bot.add_view(VerificationButtonView(self))
             self.bot.add_view(VerificationCodeView(self, None, None))  # Generic view for handling all verify_code_button interactions
             self.log.info("Successfully registered persistent views for SS13Verify")
         except Exception as e:
             self.log.error(f"Failed to register persistent views: {e}")
-
-        # On cog load, try to connect to DB for all guilds with config
-        for guild in self.bot.guilds:
-            conf = await self.config.guild(guild).all()
-            if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
-                await self.reconnect_database(guild)
 
     async def cog_unload(self):
         # Close all database connections when cog is unloaded
@@ -1737,7 +1737,15 @@ class SS13Verify(commands.Cog):
     async def fetch_latest_discord_link(self, guild, discord_id):
         """Fetch the latest discord_links entry for a discord_id, ordered by timestamp desc."""
         if not self.db_manager.is_connected(guild.id):
-            return None
+            self.log.warning(f"Database not connected for guild {guild.name} when fetching latest link for user {discord_id}")
+            # Try to reconnect automatically
+            self.log.info(f"Attempting to reconnect database for guild {guild.name}")
+            await self.reconnect_database(guild)
+
+            # Check again after reconnection attempt
+            if not self.db_manager.is_connected(guild.id):
+                self.log.error(f"Failed to reconnect database for guild {guild.name}")
+                return None
 
         try:
             link = await self.db_manager.get_latest_link_by_discord_id(guild.id, discord_id)
@@ -1750,7 +1758,14 @@ class SS13Verify(commands.Cog):
         """Fetch the latest valid discord link for a user."""
         if not self.db_manager.is_connected(guild.id):
             self.log.warning(f"Database not connected for guild {guild.name} when checking valid link for user {discord_id}")
-            return None
+            # Try to reconnect automatically
+            self.log.info(f"Attempting to reconnect database for guild {guild.name}")
+            await self.reconnect_database(guild)
+
+            # Check again after reconnection attempt
+            if not self.db_manager.is_connected(guild.id):
+                self.log.error(f"Failed to reconnect database for guild {guild.name}")
+                return None
 
         try:
             link = await self.db_manager.get_valid_link_by_discord_id(guild.id, discord_id)
