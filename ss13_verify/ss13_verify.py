@@ -1,5 +1,6 @@
 import logging
 import json
+import asyncio
 import discord
 from discord.ext import commands
 from redbot.core import commands, Config, checks
@@ -1670,7 +1671,8 @@ class SS13Verify(commands.Cog):
                 self.log.error(f"Error getting Discord accounts for ckey {ckey}: {e}")
                 await message.edit(content="❌ Error retrieving Discord account history.")
 
-    @ss13verify.command()
+    @commands.command()
+    @commands.guild_only()
     async def deverify(self, ctx: commands.Context, user: discord.Member = None):
         """
         Deverify a user, removing their verification and preventing auto-verification.
@@ -1795,10 +1797,16 @@ class SS13Verify(commands.Cog):
         if not self.db_manager.is_connected(guild.id):
             raise RuntimeError(f"Database not connected for guild {guild.name}")
 
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         new_token = self.generate_auto_token(original_token, now)
 
         try:
+            # First, invalidate all previous valid links for this ckey and discord_id
+            invalidated_count = await self.db_manager.invalidate_previous_links(guild.id, ckey, discord_id)
+            if invalidated_count > 0:
+                self.log.info(f"Invalidated {invalidated_count} previous links before creating new auto link for {ckey} and discord_id {discord_id}")
+
+            # Then create the new valid link
             await self.db_manager.create_link(
                 guild_id=guild.id,
                 ckey=ckey,
@@ -1865,13 +1873,7 @@ class SS13Verify(commands.Cog):
                     await msg.edit(content=f"Automatic verification completed! Welcome back, `{ckey}`.")
                     return True, ckey
                 else:
-                    if user_is_deverified:
-                        failure_msg = "You have been manually deverified. Auto-verification is not available."
-                    elif not autoverification_enabled:
-                        failure_msg = "Auto-verification is currently disabled."
-                    else:
-                        failure_msg = "No previous link found for auto verification."
-                    await msg.edit(content=failure_msg)
+                    await msg.delete()
                     return False, None
         elif dm:
             try:
@@ -1879,7 +1881,7 @@ class SS13Verify(commands.Cog):
                 typing_ctx = dm_channel.typing() if hasattr(dm_channel, 'typing') else None
                 if typing_ctx:
                     await typing_ctx.__aenter__()
-                await dm_channel.send("Attempting to auto verify...")
+                dm_message = await dm_channel.send("Attempting to auto verify...")
                 if link:
                     ckey = link["ckey"]
                     original_token = link["one_time_token"]
@@ -1907,7 +1909,7 @@ class SS13Verify(commands.Cog):
 
                     if panel_message_link:
                         msg += f"\n<{panel_message_link}>"
-                    await dm_channel.send(msg)
+                    await dm_message.edit(content=msg)
                     if typing_ctx:
                         await typing_ctx.__aexit__(None, None, None)
                     return False, None
@@ -1928,10 +1930,16 @@ class SS13Verify(commands.Cog):
 
         # Assign roles using the helper function
         await self.ensure_user_roles(guild, user)
+
+        # Send comprehensive DM embed to user
+        await self.send_verification_success_dm(guild, user, ckey)
+
         # Send confirmation
         msg = f"Verification completed! Welcome, `{ckey}`."
         if ticket_channel:
             await ticket_channel.send(msg)
+            # Wait a few seconds so the user can read the success message
+            await asyncio.sleep(3)
             try:
                 await ticket_channel.delete(reason="Verification completed")
             except Exception:
@@ -1939,6 +1947,103 @@ class SS13Verify(commands.Cog):
             await self.config.member(user).open_ticket.clear()
         elif dm_channel:
             await dm_channel.send(msg)
+
+    async def send_verification_success_dm(self, guild, user, ckey):
+        """Send a comprehensive DM embed to the user after successful verification."""
+        try:
+            # Get bot prefix for deverify command instruction
+            prefix = await self.bot.get_valid_prefixes(guild)
+            bot_prefix = prefix[0] if prefix else "!"
+
+            # Get or create an invite URL for the guild
+            invite_url = await self.get_or_create_guild_invite(guild)
+
+            # Create the embed
+            embed = discord.Embed(
+                title="Discord and ckey linked!",
+                description=f"Your Discord account has been successfully linked to your SS13 ckey!\n\n"
+                           f"If you want to link a different ckey in the future, you can use `{bot_prefix}deverify` "
+                           f"to unlink your current ckey and verify with a new one.",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+
+            # Set author to guild name with guild icon and invite URL (if available)
+            author_kwargs = {
+                "name": guild.name,
+                "icon_url": guild.icon.url if guild.icon else None
+            }
+            if invite_url:
+                author_kwargs["url"] = invite_url
+            embed.set_author(**author_kwargs)
+
+            # Set thumbnail to user's avatar
+            embed.set_thumbnail(url=user.display_avatar.url)
+
+            # Add field showing the linked ckey
+            embed.add_field(
+                name="🔗 Linked Ckey",
+                value=f"`{ckey}`",
+                inline=False
+            )
+
+            # Set footer with guild name and verification system
+            embed.set_footer(
+                text=f"{guild.name} • Discord Verification",
+                icon_url=guild.icon.url if guild.icon else None
+            )
+
+            # Send DM
+            dm_channel = user.dm_channel or await user.create_dm()
+            await dm_channel.send(embed=embed)
+
+        except Exception as e:
+            self.log.warning(f"Failed to send verification success DM to {user}: {e}")
+
+    async def get_or_create_guild_invite(self, guild):
+        """Get an existing unlimited invite or create a new one for the guild."""
+        try:
+            # First, try to find an existing unlimited invite
+            invites = await guild.invites()
+            for invite in invites:
+                # Look for invites that never expire and have unlimited uses
+                if invite.max_age == 0 and invite.max_uses == 0:
+                    self.log.debug(f"Found existing unlimited invite for {guild.name}: {invite.url}")
+                    return invite.url
+
+            # No unlimited invite found, try to create one
+            # Prefer the ticket channel first, then any channel we can create invites in
+            invite_channel = None
+
+            # Try ticket channel first
+            ticket_channel_id = await self.config.guild(guild).ticket_channel()
+            if ticket_channel_id:
+                ticket_channel = guild.get_channel(ticket_channel_id)
+                if ticket_channel and ticket_channel.permissions_for(guild.me).create_instant_invite:
+                    invite_channel = ticket_channel
+
+            # Fall back to any text channel we can create invites in
+            if not invite_channel:
+                for channel in guild.text_channels:
+                    if channel.permissions_for(guild.me).create_instant_invite:
+                        invite_channel = channel
+                        break
+
+            if invite_channel:
+                invite = await invite_channel.create_invite(
+                    max_age=0,      # Never expires
+                    max_uses=0,     # Unlimited uses
+                    reason="SS13Verify DM embed invite link"
+                )
+                self.log.info(f"Created new unlimited invite for {guild.name}: {invite.url}")
+                return invite.url
+            else:
+                self.log.warning(f"No suitable channel found to create invite for {guild.name}")
+                return None
+
+        except Exception as e:
+            self.log.warning(f"Failed to get or create invite for {guild.name}: {e}")
+            return None
 
     async def perform_deverify(self, guild, target_user, command_author):
         """Perform the actual deverification process."""
@@ -1978,29 +2083,14 @@ class SS13Verify(commands.Cog):
             try:
                 dm_channel = target_user.dm_channel or await target_user.create_dm()
 
-                # Create permanent invite
-                invite = None
-                try:
-                    # Try to get ticket channel first, then any text channel
-                    ticket_channel_id = await self.config.guild(guild).ticket_channel()
-                    invite_channel = guild.get_channel(ticket_channel_id) if ticket_channel_id else None
-                    if not invite_channel:
-                        invite_channel = next((ch for ch in guild.text_channels if ch.permissions_for(guild.me).create_instant_invite), None)
-
-                    if invite_channel:
-                        invite = await invite_channel.create_invite(
-                            max_age=0,  # Never expires
-                            max_uses=0,  # Unlimited uses
-                            reason=f"Deverification invite for {target_user}"
-                        )
-                except Exception as e:
-                    self.log.warning(f"Failed to create invite for {target_user}: {e}")
+                # Get or create permanent invite
+                invite_url = await self.get_or_create_guild_invite(guild)
 
                 dm_msg = f"You have been deverified from **{guild.name}**.\n\n"
                 dm_msg += "This means your current verification has been removed and you can now verify with a different ckey.\n\n"
                 dm_msg += f"You can rejoin the server to verify with a new account"
-                if invite:
-                    dm_msg += f": {invite.url}"
+                if invite_url:
+                    dm_msg += f": {invite_url}"
                 else:
                     dm_msg += "."
 

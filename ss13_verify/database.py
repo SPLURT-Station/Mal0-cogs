@@ -2,7 +2,6 @@
 Database manager for SS13Verify cog using SQLAlchemy.
 """
 import logging
-from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -227,7 +226,7 @@ class DatabaseManager:
             return result.scalars().all()
 
     async def create_link(self, guild_id: int, ckey: str, discord_id: int,
-                         one_time_token: str, valid: bool = True) -> DiscordLink:
+                         one_time_token: str, valid: bool = False) -> DiscordLink:
         """Create a new discord link."""
         log.info(f"Creating link for ckey '{ckey}' and discord_id {discord_id} in guild {guild_id}")
 
@@ -237,8 +236,8 @@ class DatabaseManager:
                 ckey=ckey,
                 discord_id=discord_id,
                 one_time_token=one_time_token,
-                valid=valid,
-                timestamp=datetime.utcnow()
+                valid=valid
+                # timestamp and id are handled automatically by the database
             )
             session.add(link)
             await session.flush()  # Get the ID
@@ -263,6 +262,42 @@ class DatabaseManager:
             log.info(f"Invalidated {count} links for discord_id {discord_id}")
             return count
 
+    async def invalidate_links_by_ckey(self, guild_id: int, ckey: str) -> int:
+        """Invalidate all valid links for a ckey."""
+        log.info(f"Invalidating links for ckey '{ckey}' in guild {guild_id}")
+
+        model = self.get_model(guild_id)
+        async with self.get_session(guild_id) as session:
+            result = await session.execute(
+                update(model)
+                .where(and_(model.ckey == ckey, model.valid == True))
+                .values(valid=False)
+            )
+            count = result.rowcount
+
+            log.info(f"Invalidated {count} links for ckey '{ckey}'")
+            return count
+
+    async def invalidate_previous_links(self, guild_id: int, ckey: str, discord_id: int) -> int:
+        """Invalidate all previous valid links for both the ckey and discord_id before creating a new verified link."""
+        log.info(f"Invalidating previous links for ckey '{ckey}' and discord_id {discord_id} in guild {guild_id}")
+
+        model = self.get_model(guild_id)
+        async with self.get_session(guild_id) as session:
+            # Invalidate all valid links for this ckey OR this discord_id
+            result = await session.execute(
+                update(model)
+                .where(and_(
+                    or_(model.ckey == ckey, model.discord_id == discord_id),
+                    model.valid == True
+                ))
+                .values(valid=False)
+            )
+            count = result.rowcount
+
+            log.info(f"Invalidated {count} previous links for ckey '{ckey}' and discord_id {discord_id}")
+            return count
+
     async def verify_code(self, guild_id: int, code: str, discord_id: int) -> Optional[DiscordLink]:
         """Verify a one-time code and mark the link as valid."""
         log.info(f"Verifying code for discord_id {discord_id} in guild {guild_id}")
@@ -281,7 +316,17 @@ class DatabaseManager:
             link = result.scalar_one_or_none()
 
             if link:
-                # Update the link to be valid and set discord_id
+                # First, invalidate all previous valid links for this ckey and discord_id
+                await session.execute(
+                    update(model)
+                    .where(and_(
+                        or_(model.ckey == link.ckey, model.discord_id == discord_id),
+                        model.valid == True
+                    ))
+                    .values(valid=False)
+                )
+
+                # Then update the link to be valid and set discord_id
                 link.valid = True
                 link.discord_id = discord_id
                 await session.flush()
