@@ -60,6 +60,14 @@ class SS13Verify(commands.Cog):
         self.config.register_member(**default_member)
 
     async def cog_load(self):
+        # Add persistent views back to the bot so buttons work after reload
+        try:
+            self.bot.add_view(VerificationButtonView(self))
+            self.bot.add_view(VerificationCodeView(self, None, None))  # Generic view for handling all verify_code_button interactions
+            self.log.info("Successfully registered persistent views for SS13Verify")
+        except Exception as e:
+            self.log.error(f"Failed to register persistent views: {e}")
+
         # On cog load, try to connect to DB for all guilds with config
         for guild in self.bot.guilds:
             conf = await self.config.guild(guild).all()
@@ -2326,16 +2334,22 @@ class VerificationCodeView(discord.ui.View):
     def __init__(self, cog, user, guild):
         super().__init__(timeout=None)
         self.cog = cog
-        self.user = user
-        self.guild = guild
+        self.user = user  # Can be None for persistent view registration
+        self.guild = guild  # Can be None for persistent view registration
 
     @discord.ui.button(label="Enter Verification Code", style=discord.ButtonStyle.primary, custom_id="verify_code_button")
     async def verify_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Only allow the ticket owner to use the button
-        if interaction.user.id != self.user.id:
-            await interaction.response.send_message("You are not the ticket owner.", ephemeral=True)
+        # Get the actual user and guild from interaction
+        user = interaction.user
+        guild = interaction.guild
+
+        # Check if this is a verification ticket by looking for open ticket in config
+        open_ticket = await self.cog.config.member(user).open_ticket()
+        if not open_ticket or open_ticket != interaction.channel.id:
+            await interaction.response.send_message("This doesn't appear to be your verification ticket.", ephemeral=True)
             return
-        await interaction.response.send_modal(VerificationCodeModal(self.cog, self.user, self.guild, interaction.channel))
+
+        await interaction.response.send_modal(VerificationCodeModal(self.cog, user, guild, interaction.channel))
 
 class VerificationCodeModal(discord.ui.Modal, title="Enter Verification Code"):
     code = ui.TextInput(label="Verification Code", style=discord.TextStyle.short, required=True, max_length=100)
