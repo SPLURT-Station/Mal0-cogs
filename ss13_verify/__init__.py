@@ -1,4 +1,4 @@
-from .ss13_verify import SS13Verify
+from .ckeytools import CkeyTools
 
 async def setup(bot):
-    await bot.add_cog(SS13Verify(bot))
+    await bot.add_cog(CkeyTools(bot))

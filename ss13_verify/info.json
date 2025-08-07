@@ -2,13 +2,14 @@
     "author": [
         "Mal0"
     ],
-    "name": "SS13Verify",
-    "short": "SS13 Discord verification system",
-    "description": "A comprehensive SS13 Discord verification system with ticket-based verification, auto-verification, role assignment, and database linking. Replaces tgverify and tgdb with modern Discord features.",
-    "install_msg": "Thank you for installing SS13Verify! Use [p]ss13verify to configure the verification system. Make sure to set up your database connection and configure the verification panel.",
+    "name": "CkeyTools",
+    "short": "SS13 Discord verification and management system",
+    "description": "A comprehensive SS13 Discord verification and management system with ticket-based verification, auto-verification, role assignment, database linking, and autodonator features. Modular design with flexible tier naming support. Replaces tgverify, tgdb, and ckeytools with modern Discord features.",
+    "install_msg": "Thank you for installing CkeyTools! Use [p]ckeytools to configure the verification system. Make sure to set up your database connection and configure the verification panel. The autodonator system supports flexible tier naming (e.g., 'donators/tier_1', 'supporters/bronze').",
     "requirements": [
         "aiomysql",
-        "sqlalchemy[asyncio]"
+        "sqlalchemy[asyncio]",
+        "tomlkit"
     ],
     "tags": [
         "SS13",
@@ -17,10 +18,13 @@
         "database",
         "tickets",
         "roles",
-        "ckey"
+        "ckey",
+        "autodonator",
+        "donator",
+        "modular"
     ],
     "min_bot_version": "3.5.0",
     "hidden": false,
-    "end_user_data_statement": "This cog stores user verification data including Discord IDs, ckeys, verification tokens, and timestamps in both the configured MySQL database and Red's Config system. It also tracks open tickets and deverified users.",
+    "end_user_data_statement": "This cog stores user verification data including Discord IDs, ckeys, verification tokens, and timestamps in both the configured MySQL database and Red's Config system. It also tracks open tickets, deverified users, and donator tier configurations for automated TOML file generation.",
     "type": "COG"
 }
