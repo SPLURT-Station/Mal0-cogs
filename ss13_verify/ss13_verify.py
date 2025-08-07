@@ -2388,6 +2388,7 @@ class VerificationCodeModal(discord.ui.Modal, title="Enter Verification Code"):
         if verified:
             await self.cog.finish_verification(self.guild, self.user, ckey, ticket_channel=self.ticket_channel)
             await interaction.response.send_message(f"Verification successful! Welcome, `{ckey}`.", ephemeral=True)
+            self.stop()
         else:
             await interaction.response.send_message(
                 "❌ Could not verify your code. Please try again or ping staff for help.", ephemeral=True
