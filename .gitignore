@@ -133,3 +133,6 @@ dmypy.json
 
 # Backup Stuff
 *.ffs_db
+
+# Redbot instances data
+data/
