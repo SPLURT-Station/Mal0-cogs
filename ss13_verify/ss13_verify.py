@@ -1,8 +1,10 @@
 import logging
 import json
 import asyncio
+import os
 import discord
 from discord.ext import commands
+from discord.ext import tasks
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 from redbot.core.utils import chat_formatting
@@ -13,6 +15,7 @@ from discord import ui
 from .helpers import normalise_to_ckey
 from .database import DatabaseManager
 from .models import DiscordLink
+import tomlkit
 
 class SS13Verify(commands.Cog):
     """
@@ -51,6 +54,11 @@ class SS13Verify(commands.Cog):
             "ticket_staff_roles": [],  # List of role IDs that get staff access to tickets
             "ticket_staff_permissions": {},  # Permissions for staff roles in tickets
             "ticket_opener_permissions": {},  # Permissions for the user who opened the ticket
+            # Autodonator (role → TOML path) system
+            "autodonator_enabled": False,
+            "autodonator_config_folder": None,
+            "autodonator_file_name": "donator.toml",
+            "autodonator_role_paths": {},  # {role_id(str): "path.to.key"}
         }
         self.config.register_guild(**default_guild)
         # Per-user config (for future use, e.g. to track open tickets)
@@ -74,9 +82,22 @@ class SS13Verify(commands.Cog):
         except Exception as e:
             self.log.error(f"Failed to register persistent views: {e}")
 
+        # Start autodonator periodic updater
+        try:
+            if not self.autodonator_update.is_running():
+                self.autodonator_update.start()
+        except Exception as e:
+            self.log.error(f"Failed to start autodonator updater: {e}")
+
     async def cog_unload(self):
         # Close all database connections when cog is unloaded
         await self.db_manager.disconnect_all()
+        # Stop autodonator periodic updater
+        try:
+            if self.autodonator_update.is_running():
+                self.autodonator_update.cancel()
+        except Exception:
+            pass
 
     async def reconnect_database(self, guild):
         """Reconnect the database for a guild using SQLAlchemy."""
@@ -2325,6 +2346,228 @@ class SS13Verify(commands.Cog):
                     await member.add_roles(*roles, reason="SS13 auto-verification successful")
                 except Exception as role_e:
                     self.log.error(f"Failed to assign roles to {member} during auto-verification: {role_e}")
+
+    # =========================
+    # Autodonator (ckey list → TOML)
+    # =========================
+
+    def _build_nested_dict_with_array(self, base: dict, path: str, values: list):
+        """Given a dotted TOML path like 'donator.tier_1', set the array at that key.
+        For single-token path like 'group', sets base['group'] = values.
+        Merges with existing arrays if present.
+        """
+        tokens = [p for p in path.split('.') if p]
+        if not tokens:
+            return base
+        current = base
+        for parent in tokens[:-1]:
+            if parent not in current or not isinstance(current[parent], dict):
+                current[parent] = {}
+            current = current[parent]
+        leaf = tokens[-1]
+        existing = current.get(leaf, [])
+        if isinstance(existing, list):
+            merged = list(dict.fromkeys([*existing, *values]))
+            current[leaf] = merged
+        else:
+            current[leaf] = list(dict.fromkeys(values))
+        return base
+
+    async def _collect_ckeys_for_role(self, guild: discord.Guild, role: discord.Role) -> list:
+        """Collect latest ckeys for all members having the role using the guild DB."""
+        if role is None:
+            return []
+        if not self.db_manager.is_connected(guild.id):
+            return []
+        ckeys = []
+        for member in role.members:
+            try:
+                link = await self.db_manager.get_latest_link_by_discord_id(guild.id, member.id)
+                if link and link.ckey:
+                    ckeys.append(link.ckey)
+            except Exception as e:
+                self.log.debug(f"Failed to get link for member {member} in role {role}: {e}")
+        # Deduplicate while preserving order
+        return list(dict.fromkeys(ckeys))
+
+    async def rebuild_autodonator_file(self, guild: discord.Guild):
+        """Rebuild the TOML file from role→path mappings."""
+        conf = await self.config.guild(guild).all()
+        folder = conf.get("autodonator_config_folder")
+        file_name = conf.get("autodonator_file_name") or "donator.toml"
+        role_paths: dict = conf.get("autodonator_role_paths") or {}
+
+        # Resolve folder path
+        if not folder:
+            folder = os.path.abspath(os.getcwd())
+        folder = os.path.abspath(folder)
+        os.makedirs(folder, exist_ok=True)
+        file_path = os.path.join(folder, file_name)
+
+        # Build nested structure
+        output: dict = {}
+        for role_id_str, toml_path in role_paths.items():
+            try:
+                role_id = int(role_id_str)
+            except Exception:
+                continue
+            role = guild.get_role(role_id)
+            if not role:
+                continue
+            ckeys = await self._collect_ckeys_for_role(guild, role)
+            if not ckeys:
+                # Still create key with empty array so consumers can rely on presence
+                self._build_nested_dict_with_array(output, toml_path, [])
+            else:
+                self._build_nested_dict_with_array(output, toml_path, ckeys)
+
+        # Write TOML using tomlkit to preserve formatting niceties
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(tomlkit.dumps(output))
+        except Exception as e:
+            self.log.error(f"Failed to write autodonator file for guild {guild.name}: {e}")
+
+    @tasks.loop(minutes=5)
+    async def autodonator_update(self):
+        """Periodic updater for autodonator TOML file."""
+        for guild in self.bot.guilds:
+            try:
+                enabled = await self.config.guild(guild).autodonator_enabled()
+                if enabled:
+                    await self.rebuild_autodonator_file(guild)
+            except Exception as e:
+                self.log.debug(f"Autodonator update failed for {guild.name}: {e}")
+
+    @autodonator_update.before_loop
+    async def _before_autodonator_update(self):
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        """When roles change, refresh the file if autodonator is enabled."""
+        if before.guild.id != after.guild.id:
+            return
+        if set(before.roles) == set(after.roles):
+            return
+        enabled = await self.config.guild(after.guild).autodonator_enabled()
+        if not enabled:
+            return
+        try:
+            await self.rebuild_autodonator_file(after.guild)
+        except Exception as e:
+            self.log.debug(f"Autodonator rebuild on role change failed for {after.guild.name}: {e}")
+
+    # Command surface: [p]ckeytools autodonator ...
+    @commands.group()
+    async def ckeytools(self, ctx: commands.Context):
+        """CKEY tools extension commands."""
+        pass
+
+    @ckeytools.group()
+    @checks.is_owner()
+    async def autodonator(self, ctx: commands.Context):
+        """Commands for automatic management of donator-style role exports (TOML)."""
+        pass
+
+    @autodonator.command(name="update")
+    async def autodonator_update_cmd(self, ctx: commands.Context):
+        """Manually rebuild the autodonator TOML file."""
+        await self.rebuild_autodonator_file(ctx.guild)
+        await ctx.tick()
+
+    @autodonator.command(name="check")
+    async def autodonator_check_file(self, ctx: commands.Context):
+        """Show the current autodonator TOML file contents."""
+        folder = await self.config.guild(ctx.guild).autodonator_config_folder()
+        file_name = await self.config.guild(ctx.guild).autodonator_file_name()
+        if not folder:
+            folder = os.path.abspath(os.getcwd())
+        file_path = os.path.abspath(os.path.join(folder, file_name))
+        try:
+            with open(file_path, "r", encoding="utf-8") as fp:
+                await ctx.send(chat_formatting.box(fp.read(), "toml"))
+        except FileNotFoundError:
+            await ctx.send("❌ Autodonator file not found. Try running `update` first.")
+
+    @autodonator.group(name="config")
+    async def autodonator_config(self, ctx: commands.Context):
+        """Configuration for autodonator exports."""
+        pass
+
+    @autodonator_config.command(name="folder")
+    async def autodonator_set_folder(self, ctx: commands.Context, *, folder_path: str):
+        """Set the target folder where the TOML export will be saved."""
+        folder_path = os.path.abspath(folder_path)
+        if not (os.path.exists(folder_path) and os.path.isdir(folder_path)):
+            await ctx.send("❌ This path is not a valid folder!")
+            return
+        await self.config.guild(ctx.guild).autodonator_config_folder.set(folder_path)
+        await ctx.tick()
+
+    @autodonator_config.command(name="filename")
+    async def autodonator_set_filename(self, ctx: commands.Context, *, file_name: str):
+        """Set the TOML file name (default: donator.toml)."""
+        # Basic sanitization
+        file_name = file_name.strip()
+        if not file_name.lower().endswith(".toml"):
+            file_name += ".toml"
+        await self.config.guild(ctx.guild).autodonator_file_name.set(file_name)
+        await ctx.tick()
+
+    @autodonator_config.command(name="toggle")
+    async def autodonator_toggle(self, ctx: commands.Context, *, on_or_off: str = None):
+        """Toggle automatic autodonator updates (periodic and on role change)."""
+        current = await self.config.guild(ctx.guild).autodonator_enabled()
+        if on_or_off is None:
+            await ctx.send(f"This option is currently set to {'on' if current else 'off'}")
+            return
+        on_or_off_l = on_or_off.lower()
+        if on_or_off_l not in {"on", "off"}:
+            await ctx.send(f"This option is currently set to {'on' if current else 'off'}")
+            return
+        new_value = on_or_off_l == "on"
+        await self.config.guild(ctx.guild).autodonator_enabled.set(new_value)
+        await ctx.send("Donator export updates are now {}.".format("enabled" if new_value else "disabled"))
+
+    @autodonator_config.command(name="map")
+    async def autodonator_map_role(self, ctx: commands.Context, role: discord.Role, *, toml_path: str):
+        """Map a role to a TOML path (e.g., donator.tier_1)."""
+        if ctx.guild.get_role(role.id) is None:
+            await ctx.send_help()
+            return
+        mappings = await self.config.guild(ctx.guild).autodonator_role_paths()
+        mappings[str(role.id)] = toml_path.strip()
+        await self.config.guild(ctx.guild).autodonator_role_paths.set(mappings)
+        await ctx.send(f"Mapped role {role.name} to `{toml_path.strip()}`")
+        # Rebuild after mapping change
+        await self.rebuild_autodonator_file(ctx.guild)
+
+    @autodonator_config.command(name="unmap")
+    async def autodonator_unmap_role(self, ctx: commands.Context, role: discord.Role):
+        """Remove a role→path mapping."""
+        mappings = await self.config.guild(ctx.guild).autodonator_role_paths()
+        if str(role.id) in mappings:
+            del mappings[str(role.id)]
+            await self.config.guild(ctx.guild).autodonator_role_paths.set(mappings)
+            await ctx.send(f"Unmapped role {role.name} from autodonator configuration")
+            await self.rebuild_autodonator_file(ctx.guild)
+        else:
+            await ctx.send("This role is not mapped.")
+
+    @autodonator_config.command(name="list")
+    async def autodonator_list_mappings(self, ctx: commands.Context):
+        """List current role→path mappings."""
+        mappings = await self.config.guild(ctx.guild).autodonator_role_paths()
+        if not mappings:
+            await ctx.send("No autodonator mappings configured.")
+            return
+        lines = []
+        for role_id_str, path in mappings.items():
+            role = ctx.guild.get_role(int(role_id_str))
+            role_name = role.name if role else f"Unknown({role_id_str})"
+            lines.append(f"- {role_name}: {path}")
+        await ctx.send(chat_formatting.box("\n".join(lines), "yaml"))
 
 class VerificationButtonView(discord.ui.View):
     """View for the verification button."""
