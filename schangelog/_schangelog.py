@@ -495,6 +495,178 @@ class SChangelog(commands.Cog):
         await self.config.guild(ctx.guild).cached.set({})
         await ctx.tick()
 
+    # ==========================
+    # Menu (interactive) command
+    # ==========================
+
+    async def _fetch_day_aggregated(self, ctx: commands.Context, daydate: date) -> Dict[str, Dict[str, List[str]]]:
+        start_date, end_date = daydate, daydate
+        window = await self._fetch_window_from_sources(ctx, start_date, end_date)
+        # window keys are day strings; if none, return {}
+        data = window.get(daydate.strftime("%Y-%m-%d"), {})
+        # already aggregated by author
+        return data
+
+    async def _build_day_menu_embed(self, ctx: commands.Context, daydate: date, data_by_author: Dict[str, Dict[str, List[str]]]) -> discord.Embed:
+        guild = ctx.guild
+        guildpic = guild.icon
+        eColor = await self.config.guild(guild).embed_color()
+        footers = await self.config.guild(guild).footer_lines()
+        footer = random.choice(footers)
+        while (len(footers) > 1) and footer == await self.config.guild(guild).last_footer():
+            footer = random.choice(footers)
+        await self.config.guild(guild).last_footer.set(footer)
+
+        num_authors = len(data_by_author)
+        description = f"{daydate.strftime('%Y-%m-%d')} — There were **{num_authors}** active changelogs."
+
+        embed = discord.Embed(title="Changelogs Menu", description=description, color=discord.Colour.from_rgb(*eColor), timestamp=discord.utils.utcnow())
+        embed.set_author(name=f"{guild.name}'s Changelogs", icon_url=guildpic)
+        embed.set_footer(text=footer, icon_url=ctx.me.avatar)
+        embed.set_thumbnail(url=guildpic)
+
+        if num_authors == 0:
+            embed.add_field(name="No entries", value=chat_formatting.box("No changelogs found for this day.", "yaml"), inline=False)
+            return embed
+
+        for author, tags in data_by_author.items():
+            shown_name = author
+            content = ""
+            for tag, entries in tags.items():
+                content += f"\n{tag}: "
+                for entry in entries:
+                    if len(content + "\n  - " + entry) > 1014:
+                        embed.add_field(name=shown_name, value=chat_formatting.box(content.strip(), "yaml"), inline=False)
+                        content = f"\n{tag}: "
+                        shown_name = "\u200b"
+                    content += "\n  - " + entry
+            if content.strip():
+                embed.add_field(name=shown_name, value=chat_formatting.box(content.strip(), "yaml"), inline=False)
+        return embed
+
+    @schangelog.command(name="menu")
+    async def schangelog_menu(self, ctx: commands.Context, day: Optional[str] = None):
+        """
+        Open an interactive menu to browse daily changelogs aggregated from sources.
+
+        day: YYYY-mm-dd or 'today' (defaults to today)
+        """
+        ref = (day or "").strip().lower()
+        if not ref or ref == "today":
+            current_day = date.today()
+        else:
+            try:
+                current_day = datetime.strptime(day, "%Y-%m-%d").date()
+            except Exception:
+                await ctx.send("That's not a valid date, dummy")
+                return
+
+        data_by_author = await self._fetch_day_aggregated(ctx, current_day)
+        embed = await self._build_day_menu_embed(ctx, current_day, data_by_author)
+
+        view = ChangelogMenuView(cog=self, ctx=ctx, start_day=current_day)
+        msg = await ctx.send(embed=embed, view=view)
+        view.message = msg
+
+
+class CalendarModal(discord.ui.Modal, title="Go to date"):
+    date_input: discord.ui.TextInput
+
+    def __init__(self, view: "ChangelogMenuView"):
+        super().__init__(timeout=60)
+        self.view_ref = view
+        self.date_input = discord.ui.TextInput(label="Date (YYYY-mm-dd or 'today')", style=discord.TextStyle.short, required=True, max_length=20)
+        self.add_item(self.date_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        view = self.view_ref
+        if interaction.user.id != view.invoker_id:
+            await interaction.response.send_message("You're not the user who invoked this menu.", ephemeral=True)
+            return
+        text = str(self.date_input.value).strip().lower()
+        if text == "today":
+            new_day = date.today()
+        else:
+            try:
+                new_day = datetime.strptime(text, "%Y-%m-%d").date()
+            except Exception:
+                await interaction.response.send_message("Invalid date.", ephemeral=True)
+                return
+        await view.update_to_day(interaction, new_day)
+
+
+class ChangelogMenuView(discord.ui.View):
+    def __init__(self, cog: SChangelog, ctx: commands.Context, start_day: date):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.ctx = ctx
+        self.current_day = start_day
+        self.invoker_id = ctx.author.id
+        self.message: Optional[discord.Message] = None
+
+    async def on_timeout(self) -> None:
+        try:
+            if self.message:
+                await self.message.edit(view=None)
+        except Exception:
+            pass
+
+    async def update_to_day(self, interaction: discord.Interaction, new_day: date) -> None:
+        # refresh message for new day
+        self.current_day = new_day
+        await interaction.response.defer()
+        data = await self.cog._fetch_day_aggregated(self.ctx, new_day)
+        embed = await self.cog._build_day_menu_embed(self.ctx, new_day, data)
+        try:
+            if self.message:
+                await self.message.edit(embed=embed, view=self)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self)
+        except Exception:
+            pass
+        self.reset_timeout()
+
+    async def _ensure_invoker(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.invoker_id:
+            if interaction.response.is_done():
+                await interaction.followup.send("You're not the user who invoked this menu.", ephemeral=True)
+            else:
+                await interaction.response.send_message("You're not the user who invoked this menu.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(emoji="\u25C0\uFE0F", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._ensure_invoker(interaction):
+            return
+        await self.update_to_day(interaction, self.current_day - timedelta(days=1))
+
+    @discord.ui.button(emoji="\U0001F4C5", style=discord.ButtonStyle.secondary)
+    async def calendar_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message("You're not the user who invoked this menu.", ephemeral=True)
+            return
+        await interaction.response.send_modal(CalendarModal(self))
+
+    @discord.ui.button(emoji="\u25B6\uFE0F", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._ensure_invoker(interaction):
+            return
+        await self.update_to_day(interaction, self.current_day + timedelta(days=1))
+
+    @discord.ui.button(emoji="\u274C", style=discord.ButtonStyle.danger)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._ensure_invoker(interaction):
+            return
+        try:
+            await interaction.response.defer()
+            if self.message:
+                await self.message.delete()
+        except Exception:
+            pass
+        finally:
+            self.stop()
+
     @set.group(invoke_without_command=True)
     async def footers(self, ctx: commands.Context):
         """
