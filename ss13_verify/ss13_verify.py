@@ -623,9 +623,9 @@ class SS13Verify(commands.Cog):
         If no value is specified, defaults to 'allow'
 
         Examples:
-        `[p]ckeytools verify settings permissions defaultset --view_channel deny --send_messages allow`
-        `[p]ckeytools verify settings permissions defaultset -view_channel=deny -send_messages=allow`
-        `[p]ckeytools verify settings permissions defaultset --embed_links --attach_files deny`
+        `[p]ckeytools verify config permissions defaultset --view_channel deny --send_messages allow`
+        `[p]ckeytools verify config permissions defaultset -view_channel=deny -send_messages=allow`
+        `[p]ckeytools verify config permissions defaultset --embed_links --attach_files deny`
         """
         try:
             new_perms = self._parse_permission_args(args)
@@ -658,8 +658,8 @@ class SS13Verify(commands.Cog):
         Can remove multiple permissions at once by listing them separated by spaces.
 
         Examples:
-        `[p]ckeytools verify settings permissions defaultremove view_channel`
-        `[p]ckeytools verify settings permissions defaultremove view_channel send_messages attach_files`
+        `[p]ckeytools verify config permissions defaultremove view_channel`
+        `[p]ckeytools verify config permissions defaultremove view_channel send_messages attach_files`
         """
         permission_list = permissions.split()
         current_perms = await self.config.guild(ctx.guild).ticket_default_permissions()
@@ -712,7 +712,7 @@ class SS13Verify(commands.Cog):
         """
         Add a role as a staff role for tickets.
 
-        Example: `[p]ckeytools verify settings permissions staffadd @Moderator`
+        Example: `[p]ckeytools verify config permissions staffadd @Moderator`
         """
         staff_roles = await self.config.guild(ctx.guild).ticket_staff_roles()
         if role.id not in staff_roles:
@@ -728,7 +728,7 @@ class SS13Verify(commands.Cog):
         """
         Remove a role from staff roles for tickets.
 
-        Example: `[p]ckeytools verify settings permissions staffremove @Moderator`
+        Example: `[p]ckeytools verify config permissions staffremove @Moderator`
         """
         staff_roles = await self.config.guild(ctx.guild).ticket_staff_roles()
         if role.id in staff_roles:
@@ -770,9 +770,9 @@ class SS13Verify(commands.Cog):
         If no value is specified, defaults to 'allow'
 
         Examples:
-        `[p]ckeytools verify settings permissions staffset --manage_messages allow --kick_members deny`
-        `[p]ckeytools verify settings permissions staffset -manage_messages=allow -kick_members=deny`
-        `[p]ckeytools verify settings permissions staffset --view_audit_log --manage_channels`
+        `[p]ckeytools verify config permissions staffset --manage_messages allow --kick_members deny`
+        `[p]ckeytools verify config permissions staffset -manage_messages=allow -kick_members=deny`
+        `[p]ckeytools verify config permissions staffset --view_audit_log --manage_channels`
         """
         try:
             new_perms = self._parse_permission_args(args)
@@ -834,9 +834,9 @@ class SS13Verify(commands.Cog):
         If no value is specified, defaults to 'allow'
 
         Examples:
-        `[p]ckeytools verify settings permissions openerupdate --attach_files allow --embed_links deny`
-        `[p]ckeytools verify settings permissions openerupdate -attach_files=allow -embed_links=deny`
-        `[p]ckeytools verify settings permissions openerupdate --add_reactions --use_external_emojis`
+        `[p]ckeytools verify config permissions openerupdate --attach_files allow --embed_links deny`
+        `[p]ckeytools verify config permissions openerupdate -attach_files=allow -embed_links=deny`
+        `[p]ckeytools verify config permissions openerupdate --add_reactions --use_external_emojis`
         """
         try:
             new_perms = self._parse_permission_args(args)
@@ -919,7 +919,7 @@ class SS13Verify(commands.Cog):
 
         This command shows how your arguments would be parsed without actually changing any settings.
 
-        Example: `[p]ckeytools verify settings permissions testparse --view_channel deny --send_messages=allow -embed_links`
+        Example: `[p]ckeytools verify config permissions testparse --view_channel deny --send_messages=allow -embed_links`
         """
         try:
             parsed = self._parse_permission_args(args)
