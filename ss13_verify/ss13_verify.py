@@ -470,6 +470,77 @@ class SS13Verify(commands.Cog):
         else:
             await ctx.send("❌ Failed to reconnect to the database. Check your settings and try again.")
 
+    @database.command(name="status")
+    async def database_status(self, ctx: commands.Context):
+        """Check the status of the database connection and show details."""
+        import time
+        try:
+            from sqlalchemy import text
+        except Exception:
+            text = None
+
+        conf = await self.config.guild(ctx.guild).all()
+        host = conf.get("db_host")
+        port = conf.get("db_port")
+        user = conf.get("db_user")
+        db_name = conf.get("db_name")
+        prefix = conf.get("mysql_prefix") or ""
+
+        configured = all([host, port, user, conf.get("db_password"), db_name])
+        connected = self.db_manager.is_connected(ctx.guild.id)
+
+        ok = False
+        ping_ms = None
+        error_msg = None
+
+        if configured and connected:
+            # Try a very small query to validate connection
+            try:
+                engine = self.db_manager.engines.get(ctx.guild.id)
+                if engine and text is not None:
+                    start = time.perf_counter()
+                    async with engine.connect() as conn:
+                        await conn.execute(text("SELECT 1"))
+                    ping_ms = (time.perf_counter() - start) * 1000.0
+                    ok = True
+                else:
+                    # Fallback: use session open/close as a check
+                    start = time.perf_counter()
+                    async with self.db_manager.get_session(ctx.guild.id) as _:
+                        pass
+                    ping_ms = (time.perf_counter() - start) * 1000.0
+                    ok = True
+            except Exception as e:
+                error_msg = str(e)
+                ok = False
+        else:
+            ok = False
+
+        color = discord.Color.green() if ok else discord.Color.red()
+
+        embed = discord.Embed(
+            title="Database Status",
+            color=color,
+            timestamp=discord.utils.utcnow()
+        )
+
+        embed.add_field(name="Configured", value="✅ Yes" if configured else "❌ No", inline=True)
+        embed.add_field(name="Connected", value="✅ Yes" if connected else "❌ No", inline=True)
+        embed.add_field(name="Ping", value=(f"{ping_ms:.1f} ms" if ping_ms is not None else "N/A"), inline=True)
+
+        embed.add_field(name="Host", value=str(host or "-"), inline=True)
+        embed.add_field(name="Port", value=str(port or "-"), inline=True)
+        embed.add_field(name="Database", value=str(db_name or "-"), inline=True)
+        embed.add_field(name="Prefix", value=f"`{prefix}`" if prefix else "(none)", inline=True)
+
+        if error_msg and not ok:
+            # Truncate if too long for safety
+            if len(error_msg) > 1000:
+                error_msg = error_msg[:1000] + "…"
+            embed.add_field(name="Error", value=chat_formatting.box(error_msg, "text"), inline=False)
+
+        await ctx.send(embed=embed)
+
     @verify.group(name="config")
     async def verify_config(self, ctx):
         """Configure SS13Verify behavior settings."""
