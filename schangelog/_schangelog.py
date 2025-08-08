@@ -397,6 +397,45 @@ class SChangelog(commands.Cog):
         await self.config.guild(ctx.guild).cache_days.set(int(days))
         await ctx.tick()
 
+    @set.group(invoke_without_command=True)
+    async def footers(self, ctx: commands.Context):
+        """
+        Command to edit and manage footers of the changelogs
+        """
+        if ctx.invoked_subcommand is None:
+            footers = await self.config.guild(ctx.guild).footer_lines()
+            message = ""
+            for i in range(len(footers)):
+                message += f"{i+1}. {footers[i]}\n"
+            await ctx.send(chat_formatting.box(message.strip()))
+
+    @footers.command(name="add")
+    async def add_footer(self, ctx: commands.Context, *, newF: str):
+        """
+        Add a footer to the list of footers that can appear in the changelogs
+        """
+        current = await self.config.guild(ctx.guild).footer_lines()
+        current.append(newF)
+        await self.config.guild(ctx.guild).footer_lines.set(current)
+        await ctx.tick()
+
+    @footers.command(name="delete")
+    async def remove_footer(self, ctx: commands.Context, *, delF: int):
+        """
+        Remove a footer from the footer list
+        """
+        toDelete = delF - 1
+        current = await self.config.guild(ctx.guild).footer_lines()
+        if (len(current) <= 1):
+            return await ctx.send("There must be at least 1 active footer.")
+        try:
+            current.pop(toDelete)
+        except IndexError:
+            await ctx.send("Footer not found.")
+            return
+        await self.config.guild(ctx.guild).footer_lines.set(current)
+        await ctx.tick()
+
     @set_sources.command(name="remove")
     @checks.admin_or_permissions(administrator=True)
     async def set_sources_remove(self, ctx: commands.Context, index: int):
@@ -666,42 +705,3 @@ class ChangelogMenuView(discord.ui.View):
             pass
         finally:
             self.stop()
-
-    @set.group(invoke_without_command=True)
-    async def footers(self, ctx: commands.Context):
-        """
-        Command to edit and manage footers of the changelogs
-        """
-        if ctx.invoked_subcommand is None:
-            footers = await self.config.guild(ctx.guild).footer_lines()
-            message = ""
-            for i in range(len(footers)):
-                message += f"{i+1}. {footers[i]}\n"
-            await ctx.send(chat_formatting.box(message.strip()))
-
-    @footers.command(name="add")
-    async def add_footer(self, ctx: commands.Context, *, newF: str):
-        """
-        Add a footer to the list of footers that can appear in the changelogs
-        """
-        current = await self.config.guild(ctx.guild).footer_lines()
-        current.append(newF)
-        await self.config.guild(ctx.guild).footer_lines.set(current)
-        await ctx.tick()
-
-    @footers.command(name="delete")
-    async def remove_footer(self, ctx: commands.Context, *, delF: int):
-        """
-        Remove a footer from the footer list
-        """
-        toDelete = delF - 1
-        current = await self.config.guild(ctx.guild).footer_lines()
-        if (len(current) <= 1):
-            return await ctx.send("There must be at least 1 active footer.")
-        try:
-            current.pop(toDelete)
-        except IndexError:
-            await ctx.send("Footer not found.")
-            return
-        await self.config.guild(ctx.guild).footer_lines.set(current)
-        await ctx.tick()
