@@ -2,24 +2,29 @@
     "author": [
         "Mosley"
     ],
-    "description": "Add better integration functionalities for the tgdb/tgverify cogs by oranges",
-    "install_msg": "Thanks to oranges for making both the tgdb/tgverify cogs. Reminder that this cog is made to work alongside these two, so in order to use it you must have both installed and set up",
-    "short": "plugins for tgdb/tgverify",
+    "name": "CkeyTools",
+    "short": "SS13 verification, autoroles, and autodonator tools",
+    "description": "Link Discord users to SS13 ckeys via MySQL with ticket-based verification, auto-verification, and configurable role assignment. Includes an autodonator system that exports role-mapped ckey lists to TOML with arbitrary nested paths.",
+    "install_msg": "Thanks for installing CkeyTools! Use [p]ckeytools to configure verification ([p]ckeytools verify ...) and database settings ([p]ckeytools database ...). Set up the database first, then configure the verification panel and roles. Autodonator is available under [p]ckeytools autodonator ...",
     "requirements": [
-        "tgcommon",
         "aiomysql",
+        "sqlalchemy[asyncio]",
         "tomlkit"
     ],
-    "required_cogs": {
-        "tgdb": "https://github.com/optimumtact/orangescogs",
-        "tgverify": "https://github.com/optimumtact/orangescogs"
-    },
     "tags": [
-        "Space Station 13",
         "SS13",
-        "Game",
-        "Changelogs",
-        "Utility"
+        "Space Station 13",
+        "verification",
+        "database",
+        "tickets",
+        "roles",
+        "autorole",
+        "autodonator",
+        "toml",
+        "ckey"
     ],
-    "min_bot_version" :"3.5.0"
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "end_user_data_statement": "This cog stores user verification data including Discord IDs, ckeys, verification tokens, and timestamps in both the configured MySQL database and Red's Config system. It also tracks open tickets and deverified users.",
+    "type": "COG"
 }
