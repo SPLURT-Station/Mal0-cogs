@@ -3,18 +3,15 @@ import json
 import asyncio
 import os
 import discord
-from discord.ext import commands
 from discord.ext import tasks
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 from redbot.core.utils import chat_formatting
-from redbot.core.utils.views import SimpleMenu
 import hashlib
 import datetime
 from discord import ui
 from .helpers import normalise_to_ckey
 from .database import DatabaseManager
-from .models import DiscordLink
 import tomlkit
 
 class SS13Verify(commands.Cog):
