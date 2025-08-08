@@ -1,5 +1,5 @@
 """
-SQLAlchemy models for SS13Verify cog.
+SQLAlchemy models for CkeyTools cog.
 """
 from datetime import datetime
 from typing import Optional

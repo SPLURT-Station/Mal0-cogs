@@ -1,5 +1,5 @@
 """
-Database manager for SS13Verify cog using SQLAlchemy.
+Database manager for CkeyTools cog using SQLAlchemy.
 """
 import logging
 from typing import Optional, List, Dict, Any
@@ -12,12 +12,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .models import DiscordLink, Base, create_dynamic_model, get_table_name_with_prefix
 
-log = logging.getLogger("red.ss13_verify.database")
+log = logging.getLogger("red.ckeytools.database")
 
 
 class DatabaseManager:
     """
-    Manages database connections and operations for SS13Verify using SQLAlchemy.
+    Manages database connections and operations for CkeyTools using SQLAlchemy.
     """
 
     def __init__(self):
