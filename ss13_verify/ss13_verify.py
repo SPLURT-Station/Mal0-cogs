@@ -119,6 +119,12 @@ class SS13Verify(commands.Cog):
             self.log.error(f"Failed to connect to database for guild {guild.name} ({guild.id})")
 
 
+    # Root command group for this cog
+    @commands.group(name="ckeytools")
+    async def ckeytools(self, ctx: commands.Context):
+        """Main command group for SS13 verification and autodonator tools."""
+        pass
+
 
     def _get_all_discord_permissions(self):
         """Get a list of all available Discord permissions."""
@@ -340,21 +346,16 @@ class SS13Verify(commands.Cog):
 
         return overwrites
 
-    @commands.group()
+    @ckeytools.group(name="verify")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ss13verify(self, ctx):
+    async def verify(self, ctx):
         """SS13 Verification system configuration."""
         pass
 
-    @ss13verify.group()
-    async def settings(self, ctx):
-        """Configure SS13Verify behavior settings."""
-        pass
-
-    @settings.group()
+    @ckeytools.group(name="database")
     @checks.admin_or_permissions(administrator=True)
     async def database(self, ctx):
-        """Configure database connection for SS13 verification."""
+        """Configure database connection used by verification and autodonator."""
         pass
 
     @database.command()
@@ -365,7 +366,7 @@ class SS13Verify(commands.Cog):
         This is the hostname or IP address where your MySQL/MariaDB server is running.
         For local installations, this is usually 'localhost' or '127.0.0.1'.
 
-        Example: `[p]ss13verify settings database host localhost`
+        Example: `[p]ckeytools database host localhost`
         """
         await self.config.guild(ctx.guild).db_host.set(host)
         await ctx.send(f"Database host set to `{host}`.")
@@ -380,7 +381,7 @@ class SS13Verify(commands.Cog):
         The default MySQL port is 3306. Only change this if your database
         server is configured to use a different port.
 
-        Example: `[p]ss13verify settings database port 3306`
+        Example: `[p]ckeytools database port 3306`
         """
         await self.config.guild(ctx.guild).db_port.set(port)
         await ctx.send(f"Database port set to `{port}`.")
@@ -395,7 +396,7 @@ class SS13Verify(commands.Cog):
         to your SS13 database. This account needs SELECT, INSERT, and UPDATE
         permissions on the discord_links table.
 
-        Example: `[p]ss13verify settings database user ss13_bot`
+        Example: `[p]ckeytools database user ss13_bot`
         """
         await self.config.guild(ctx.guild).db_user.set(user)
         await ctx.send(f"Database user set to `{user}`.")
@@ -411,7 +412,7 @@ class SS13Verify(commands.Cog):
         **Security Note:** The password will be stored in the bot's configuration.
         Make sure to use a dedicated database account with limited permissions.
 
-        Example: `[p]ss13verify settings database password your_secure_password`
+        Example: `[p]ckeytools database password your_secure_password`
         """
         await self.config.guild(ctx.guild).db_password.set(password)
         await ctx.send("Database password set.")
@@ -427,7 +428,7 @@ class SS13Verify(commands.Cog):
 
         This is typically something like 'ss13_database' or 'tgstation'.
 
-        Example: `[p]ss13verify settings database name ss13_database`
+        Example: `[p]ckeytools database name ss13_database`
         """
         await self.config.guild(ctx.guild).db_name.set(name)
         await ctx.send(f"Database name set to `{name}`.")
@@ -444,8 +445,8 @@ class SS13Verify(commands.Cog):
         If your discord_links table is just called 'discord_links', leave this empty.
         If it's called something like 'ss13_discord_links', set this to 'ss13_'.
 
-        Example: `[p]ss13verify settings database prefix ss13_`
-        Example (no prefix): `[p]ss13verify settings database prefix ""`
+        Example: `[p]ckeytools database prefix ss13_`
+        Example (no prefix): `[p]ckeytools database prefix ""`
         """
         await self.config.guild(ctx.guild).mysql_prefix.set(prefix)
         await ctx.send(f"MySQL table prefix set to `{prefix}`.")
@@ -463,7 +464,7 @@ class SS13Verify(commands.Cog):
         This command is also useful if the database connection is lost and
         needs to be re-established.
 
-        Example: `[p]ss13verify settings database reconnect`
+        Example: `[p]ckeytools database reconnect`
         """
         await self.reconnect_database(ctx.guild)
         if self.db_manager.is_connected(ctx.guild.id):
@@ -472,7 +473,12 @@ class SS13Verify(commands.Cog):
         else:
             await ctx.send("❌ Failed to reconnect to the database. Check your settings and try again.")
 
-    @settings.group()
+    @verify.group(name="config")
+    async def verify_config(self, ctx):
+        """Configure SS13Verify behavior settings."""
+        pass
+
+    @verify_config.group()
     async def roles(self, ctx):
         """Configure verification roles."""
         pass
@@ -524,12 +530,12 @@ class SS13Verify(commands.Cog):
         await ctx.send("✅ Cleared all verification roles.")
         await ctx.tick()
 
-    @settings.group()
+    @verify_config.group()
     async def panel(self, ctx):
         """Configure the verification panel."""
         pass
 
-    @settings.group()
+    @verify_config.group()
     async def permissions(self, ctx):
         """Configure ticket permission system."""
         pass
@@ -549,9 +555,9 @@ class SS13Verify(commands.Cog):
         If no value is specified, defaults to 'allow'
 
         Examples:
-        `[p]ss13verify settings permissions defaultset --view_channel deny --send_messages allow`
-        `[p]ss13verify settings permissions defaultset -view_channel=deny -send_messages=allow`
-        `[p]ss13verify settings permissions defaultset --embed_links --attach_files deny`
+        `[p]ckeytools verify settings permissions defaultset --view_channel deny --send_messages allow`
+        `[p]ckeytools verify settings permissions defaultset -view_channel=deny -send_messages=allow`
+        `[p]ckeytools verify settings permissions defaultset --embed_links --attach_files deny`
         """
         try:
             new_perms = self._parse_permission_args(args)
@@ -584,8 +590,8 @@ class SS13Verify(commands.Cog):
         Can remove multiple permissions at once by listing them separated by spaces.
 
         Examples:
-        `[p]ss13verify settings permissions defaultremove view_channel`
-        `[p]ss13verify settings permissions defaultremove view_channel send_messages attach_files`
+        `[p]ckeytools verify settings permissions defaultremove view_channel`
+        `[p]ckeytools verify settings permissions defaultremove view_channel send_messages attach_files`
         """
         permission_list = permissions.split()
         current_perms = await self.config.guild(ctx.guild).ticket_default_permissions()
@@ -638,7 +644,7 @@ class SS13Verify(commands.Cog):
         """
         Add a role as a staff role for tickets.
 
-        Example: `[p]ss13verify settings permissions staffadd @Moderator`
+        Example: `[p]ckeytools verify settings permissions staffadd @Moderator`
         """
         staff_roles = await self.config.guild(ctx.guild).ticket_staff_roles()
         if role.id not in staff_roles:
@@ -654,7 +660,7 @@ class SS13Verify(commands.Cog):
         """
         Remove a role from staff roles for tickets.
 
-        Example: `[p]ss13verify settings permissions staffremove @Moderator`
+        Example: `[p]ckeytools verify settings permissions staffremove @Moderator`
         """
         staff_roles = await self.config.guild(ctx.guild).ticket_staff_roles()
         if role.id in staff_roles:
@@ -696,9 +702,9 @@ class SS13Verify(commands.Cog):
         If no value is specified, defaults to 'allow'
 
         Examples:
-        `[p]ss13verify settings permissions staffset --manage_messages allow --kick_members deny`
-        `[p]ss13verify settings permissions staffset -manage_messages=allow -kick_members=deny`
-        `[p]ss13verify settings permissions staffset --view_audit_log --manage_channels`
+        `[p]ckeytools verify settings permissions staffset --manage_messages allow --kick_members deny`
+        `[p]ckeytools verify settings permissions staffset -manage_messages=allow -kick_members=deny`
+        `[p]ckeytools verify settings permissions staffset --view_audit_log --manage_channels`
         """
         try:
             new_perms = self._parse_permission_args(args)
@@ -760,9 +766,9 @@ class SS13Verify(commands.Cog):
         If no value is specified, defaults to 'allow'
 
         Examples:
-        `[p]ss13verify settings permissions openerupdate --attach_files allow --embed_links deny`
-        `[p]ss13verify settings permissions openerupdate -attach_files=allow -embed_links=deny`
-        `[p]ss13verify settings permissions openerupdate --add_reactions --use_external_emojis`
+        `[p]ckeytools verify settings permissions openerupdate --attach_files allow --embed_links deny`
+        `[p]ckeytools verify settings permissions openerupdate -attach_files=allow -embed_links=deny`
+        `[p]ckeytools verify settings permissions openerupdate --add_reactions --use_external_emojis`
         """
         try:
             new_perms = self._parse_permission_args(args)
@@ -845,7 +851,7 @@ class SS13Verify(commands.Cog):
 
         This command shows how your arguments would be parsed without actually changing any settings.
 
-        Example: `[p]ss13verify settings permissions testparse --view_channel deny --send_messages=allow -embed_links`
+        Example: `[p]ckeytools verify settings permissions testparse --view_channel deny --send_messages=allow -embed_links`
         """
         try:
             parsed = self._parse_permission_args(args)
@@ -1204,7 +1210,7 @@ class SS13Verify(commands.Cog):
         """Set the channel for the verification panel."""
         embed_data = await self.config.guild(ctx.guild).panel_embed()
         if not embed_data:
-            await ctx.send("❌ You must set up the panel embed first using `[p]ss13verify panel setembed`")
+            await ctx.send("❌ You must set up the panel embed first using `[p]ckeytools verify panel setembed`")
             return
 
         await self.config.guild(ctx.guild).ticket_channel.set(channel.id)
@@ -1278,11 +1284,11 @@ class SS13Verify(commands.Cog):
         embed_data = await self.config.guild(ctx.guild).panel_embed()
 
         if not channel_id:
-            await ctx.send("❌ Panel channel not set. Use `[p]ss13verify panel setchannel` first.")
+            await ctx.send("❌ Panel channel not set. Use `[p]ckeytools verify panel setchannel` first.")
             return
 
         if not embed_data:
-            await ctx.send("❌ Panel embed not set. Use `[p]ss13verify panel setembed` first.")
+            await ctx.send("❌ Panel embed not set. Use `[p]ckeytools verify panel setembed` first.")
             return
 
         channel = ctx.guild.get_channel(channel_id)
@@ -1295,7 +1301,7 @@ class SS13Verify(commands.Cog):
         await ctx.tick()
 
 
-    @settings.command(name="invalidateonleave")
+    @verify_config.command(name="invalidateonleave")
     async def toggle_invalidate_on_leave(self, ctx, enabled: bool = None):
         """
         Toggle whether to invalidate user verification when they leave the server.
@@ -1315,7 +1321,7 @@ class SS13Verify(commands.Cog):
             await ctx.send("✅ Verified users will no longer be invalidated when they leave the server.")
         await ctx.tick()
 
-    @settings.command(name="verification")
+    @verify_config.command(name="verification")
     async def toggle_verification(self, ctx, enabled: bool = None):
         """
         Toggle the entire verification system.
@@ -1335,7 +1341,7 @@ class SS13Verify(commands.Cog):
             await ctx.send("✅ Verification system has been disabled. All verification attempts will fail.")
         await ctx.tick()
 
-    @settings.command(name="autoverification")
+    @verify_config.command(name="autoverification")
     async def toggle_autoverification(self, ctx, enabled: bool = None):
         """
         Toggle automatic verification functionality.
@@ -1355,7 +1361,7 @@ class SS13Verify(commands.Cog):
             await ctx.send("✅ Auto-verification has been disabled. Users will need to manually enter codes.")
         await ctx.tick()
 
-    @settings.command(name="autoverifyonjoin")
+    @verify_config.command(name="autoverifyonjoin")
     async def toggle_autoverify_on_join(self, ctx, enabled: bool = None):
         """
         Toggle automatic verification when users join the server.
@@ -1376,7 +1382,7 @@ class SS13Verify(commands.Cog):
             await ctx.send("✅ Auto-verification on join has been disabled.")
         await ctx.tick()
 
-    @settings.command(name="invalidategone")
+    @verify_config.command(name="invalidategone")
     @checks.admin_or_permissions(administrator=True)
     async def invalidate_gone_users(self, ctx):
         """
@@ -1411,7 +1417,7 @@ class SS13Verify(commands.Cog):
                 self.log.error(f"Error during manual invalidation in {ctx.guild.name}: {e}")
                 await ctx.send("❌ An error occurred while invalidating gone users. Check the logs for details.")
 
-    @ss13verify.command()
+    @verify.command()
     async def status(self, ctx):
         """Show the current SS13Verify configuration status."""
         conf = await self.config.guild(ctx.guild).all()
@@ -1517,7 +1523,7 @@ class SS13Verify(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @ss13verify.command()
+    @verify.command()
     async def checkuser(self, ctx, user: discord.Member):
         """Check the verification status of a user."""
         try:
@@ -1576,7 +1582,7 @@ class SS13Verify(commands.Cog):
             self.log.error(f"Error checking user verification status: {e}")
             await ctx.send("❌ Error checking verification status.")
 
-    @ss13verify.command()
+    @verify.command()
     async def ckeys(self, ctx, user: discord.Member):
         """List all past ckeys this Discord user has verified with."""
         if not self.db_manager.is_connected(ctx.guild.id):
@@ -1642,7 +1648,7 @@ class SS13Verify(commands.Cog):
                 self.log.error(f"Error getting ckeys for user {user}: {e}")
                 await message.edit(content="❌ Error retrieving ckey history.")
 
-    @ss13verify.command()
+    @verify.command()
     async def discords(self, ctx, ckey: str):
         """List all past Discord accounts this ckey has verified with."""
         if not self.db_manager.is_connected(ctx.guild.id):
@@ -2459,11 +2465,6 @@ class SS13Verify(commands.Cog):
             self.log.debug(f"Autodonator rebuild on role change failed for {after.guild.name}: {e}")
 
     # Command surface: [p]ckeytools autodonator ...
-    @commands.group()
-    async def ckeytools(self, ctx: commands.Context):
-        """CKEY tools extension commands."""
-        pass
-
     @ckeytools.group()
     @checks.is_owner()
     async def autodonator(self, ctx: commands.Context):
