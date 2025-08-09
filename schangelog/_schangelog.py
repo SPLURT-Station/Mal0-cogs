@@ -663,7 +663,7 @@ class ChangelogMenuView(discord.ui.View):
                 await interaction.edit_original_response(embed=embed, view=self)
         except Exception:
             pass
-        self.reset_timeout()
+        # View timeout is automatically refreshed on interactions in discord.py v2
 
     async def _ensure_invoker(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.invoker_id:
