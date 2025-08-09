@@ -498,10 +498,10 @@ class SChangelog(commands.Cog):
         await ctx.tick()
 
     # ==========================
-    # Cache and update commands
+    # Cache and update commands (under `set`)
     # ==========================
 
-    @schangelog.command(name="update")
+    @set.command(name="update")
     @checks.admin_or_permissions(administrator=True)
     async def schangelog_update(self, ctx: commands.Context, refday: Optional[str] = None):
         """
@@ -525,7 +525,7 @@ class SChangelog(commands.Cog):
         updated_days, months = await self._build_cache_for_range(ctx, start_date, end_date)
         await ctx.send(f"Cache rebuilt for window {start_date} to {end_date}. Days cached: {updated_days} across {len(months)} month(s)")
 
-    @schangelog.command(name="clearcache")
+    @set.command(name="clearcache")
     @checks.admin_or_permissions(administrator=True)
     async def schangelog_clearcache(self, ctx: commands.Context):
         """
@@ -560,7 +560,13 @@ class SChangelog(commands.Cog):
         description = f"{daydate.strftime('%Y-%m-%d')} — There were **{num_authors}** active changelogs."
 
         embed = discord.Embed(title="Changelogs Menu", description=description, color=discord.Colour.from_rgb(*eColor), timestamp=discord.utils.utcnow())
-        embed.set_author(name=f"{guild.name}'s Changelogs", icon_url=guildpic)
+        # Link author to the first configured repo, if available
+        author_url = None
+        sources = await self.config.guild(guild).sources()
+        if sources:
+            s0 = sources[0]
+            author_url = f"https://github.com/{s0.get('owner','')}/{s0.get('repo','')}"
+        embed.set_author(name=f"{guild.name}'s Changelogs", url=author_url, icon_url=guildpic)
         embed.set_footer(text=footer, icon_url=ctx.me.avatar)
         embed.set_thumbnail(url=guildpic)
 
@@ -693,7 +699,7 @@ class ChangelogMenuView(discord.ui.View):
             return
         await self.update_to_day(interaction, self.current_day + timedelta(days=1))
 
-    @discord.ui.button(emoji="\u274C", style=discord.ButtonStyle.danger)
+    @discord.ui.button(emoji="\u2716\uFE0F", style=discord.ButtonStyle.danger)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._ensure_invoker(interaction):
             return
