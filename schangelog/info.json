@@ -1,13 +1,15 @@
 {
     "author": [
-        "Mosley"
+        "Mosley",
+        "Mal0"
     ],
-    "description": "Post SS13 changelogs for a specific TGS instance.",
-    "install_msg": "Reminder that you must configure the path of the instance and/or github link before using. The ping option works better when used with a scheduler cog",
-    "short": "SS13 changelogs",
+    "description": "Fetch and post SS13 changelogs from multiple GitHub folders; compare web vs local cache across a rolling window; includes an interactive per-day menu.",
+    "install_msg": "Configure sources via 'schangelog set sources add <owner> <repo> <path> [branch]'. Optionally set 'schangelog set cachedays <N>' and visual settings (role/color/footers). Use 'scl [ping] [YYYY-mm-dd|today]', 'schangelog set update [refday]', and 'scl menu [refday]'.",
+    "short": "SS13 multi-source changelogs",
     "Name": "SS13 Changelogs",
     "requirements": [
-        "validators"
+        "requests",
+        "pyyaml"
     ],
     "tags": [
         "Space Station 13",
@@ -16,5 +18,5 @@
         "Changelogs",
         "Utility"
     ],
-    "min_bot_version" :"3.5.0"
+    "min_bot_version": "3.5.0"
 }
