@@ -1,0 +1,20 @@
+{
+    "author": [
+        "YourNameHere"
+    ],
+    "name": "SuggestBounties",
+    "short": "Sync suggestions to GitHub as bounties and track their status.",
+    "description": "Links suggestions from ideaboard to GitHub issues as bounties, tracks their status, and updates messages when issues are closed.",
+    "requirements": [
+        "requests",
+        "PyGithub"
+    ],
+    "tags": [
+        "github",
+        "suggestions",
+        "bounty",
+        "automation"
+    ],
+    "install_msg": "This cog links suggestions to GitHub issues as bounties and tracks their completion.",
+    "type": "COG"
+}
