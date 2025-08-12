@@ -2,20 +2,22 @@ import aiohttp
 import asyncio
 import base64
 import logging
+import os
 from redbot.core import commands, Config
 from redbot.core.commands import Context
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import humanize_list
 from discord.ext import tasks
+import re
 
 class TGSCommands(commands.Cog):
 	"""
 	A cog to interact with the TGS API.
 	"""
-	
+
 	__author__ = "Mosley"
 	__version__ = "1.0.0"
-	
+
 	def __init__(self, bot):
 		self.bot = bot
 		# Static headers
@@ -29,7 +31,8 @@ class TGSCommands(commands.Cog):
 		default_guild = {
 			"tgs_url": "https://your-tgs-url.example.com",
 			"tgs_username": "your_username",
-			"tgs_password": "your_password"
+			"tgs_password": "your_password",
+			"savefile_folder": None
 		}
 		self.config.register_global(**default_guild)
 		# Logger
@@ -175,6 +178,17 @@ class TGSCommands(commands.Cog):
 		else:
 			await ctx.send("TGS authentication failed. Check logs for details.")
 
+	@config.command(name="savefilefolder")
+	async def setsavefilefolder(self, ctx: Context, folder: str):
+		"""Set the savefile folder (must be a real folder on the machine)."""
+		folder = os.path.abspath(folder)
+		if not (os.path.exists(folder) and os.path.isdir(folder)):
+			await ctx.send(f"This path is not a valid folder: {folder}")
+			return
+		await self.config.savefile_folder.set(folder)
+		await ctx.send(f"Savefile folder set to: {folder}")
+		await ctx.tick()
+
 	@tgs.group()
 	async def instances(self, ctx: Context):
 		"""Manage TGS instances."""
@@ -279,3 +293,47 @@ class TGSCommands(commands.Cog):
 			await ctx.send(f"Failed to stop instance {instance_id}: {status} {data}")
 		else:
 			await ctx.send(f"Error stopping instance: {data}")
+
+	@tgs.group()
+	async def savefile(self, ctx: Context):
+		"""Manage SS13 savefiles."""
+		pass
+
+	@savefile.command(name="import")
+	async def savefile_import(self, ctx: Context):
+		"""Import a preferences JSON file for a ckey. Expects a file named '[ckey]_preferences_[date_and_time].json'."""
+		if not ctx.message.attachments:
+			await ctx.send("You must attach a JSON file with the correct name format.")
+			return
+		attachment = ctx.message.attachments[0]
+		filename = attachment.filename
+		# Match pattern: [ckey]_preferences_[date_and_time].json
+		match = re.match(r"^([a-zA-Z0-9_]+)_preferences_.*\.json$", filename)
+		if not match:
+			await ctx.send("Filename must be in the format '[ckey]_preferences_[date_and_time].json'.")
+			return
+		ckey = match.group(1)
+		c = ckey[0].lower()
+		savefile_folder = await self.config.savefile_folder()
+		if not savefile_folder:
+			await ctx.send("Savefile folder is not configured. Please set it with the config command.")
+			return
+		target_dir = os.path.join(savefile_folder, c, ckey)
+		os.makedirs(target_dir, exist_ok=True)
+		# Remove old preferences.json and preferences.json.updatebac if they exist
+		for fname in ["preferences.json", "preferences.json.updatebac"]:
+			fpath = os.path.join(target_dir, fname)
+			try:
+				if os.path.exists(fpath):
+					os.remove(fpath)
+			except Exception as e:
+				await ctx.send(f"Failed to remove old file {fname}: {e}")
+				return
+		# Download and save the new file as preferences.json
+		dest_path = os.path.join(target_dir, "preferences.json")
+		try:
+			await attachment.save(dest_path)
+			await ctx.send(f"Preferences imported for ckey '{ckey}' at {dest_path}.")
+			await ctx.tick()
+		except Exception as e:
+			await ctx.send(f"Failed to import preferences: {e}")
