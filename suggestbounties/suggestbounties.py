@@ -8,48 +8,32 @@ import logging
 import io
 
 class TemplateConfigView(discord.ui.View):
-    def __init__(self, schema, on_confirm, on_cancel, message=None):
-        super().__init__(timeout=60)  # 1 minute timeout
+    def __init__(self, schema, on_confirm, on_cancel, message=None, author_id: Optional[int] = None):
+        # No timeout; view will persist until explicitly cleared
+        super().__init__(timeout=None)
         self.schema = schema
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
         self.message = message
-        self.timed_out = False
+        self.author_id = author_id
 
-    async def on_timeout(self):
-        """Called when the view times out"""
-        self.timed_out = True
-        # Disable all buttons
-        for item in self.children:
-            if hasattr(item, 'disabled'):
-                item.disabled = True  # type: ignore
-        
-        if self.message:
-            try:
-                await self.message.edit(
-                    content="⏰ Template configuration timed out. Please run the command again.",
-                    view=self
-                )
-            except discord.NotFound:
-                # Message was deleted
-                pass
-            except Exception:
-                # If editing fails, try to send a new message
-                try:
-                    await self.message.channel.send("⏰ Template configuration timed out. Please run the command again.")
-                except Exception:
-                    pass
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow interactions only from the command invoker."""
+        try:
+            if self.author_id is not None and interaction.user.id != self.author_id:
+                await interaction.response.send_message("You cannot use this configuration. Only the command invoker can interact with it.", ephemeral=True)
+                return False
+        except Exception:
+            # If we fail to respond, still block the interaction
+            return False
+        return True
 
     @discord.ui.button(label="Configure Template", style=discord.ButtonStyle.green)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.timed_out:
-            await interaction.response.send_message("This configuration has timed out. Please run the command again.", ephemeral=True)
-            return
-            
         # Use SchemaModal instead of TemplateInputModal for proper dynamic field generation
         async def modal_callback(modal, modal_interaction):
             await self.on_confirm(modal.responses, modal_interaction)
-        
+
         modal = SchemaModal(
             schema=self.schema,
             message_link="",  # Empty for template configuration
@@ -62,10 +46,6 @@ class TemplateConfigView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.timed_out:
-            await interaction.response.send_message("This configuration has timed out. Please run the command again.", ephemeral=True)
-            return
-            
         await interaction.response.send_message("Template configuration cancelled.", ephemeral=True)
         await self.on_cancel()
 
@@ -85,7 +65,7 @@ class SchemaModal(discord.ui.Modal):
         self.responses = {}
         self.field_map = []  # (id, type, label, required, placeholder, description)
         self.info_texts = []
-        
+
         # Add title field if schema has a title
         if "title" in schema:
             self.add_item(discord.ui.TextInput(
@@ -97,7 +77,7 @@ class SchemaModal(discord.ui.Modal):
                 style=discord.TextStyle.short,
                 custom_id="title"
             ))
-        
+
         # Parse schema body
         field_count = 1 if "title" in schema else 0
         for item in schema.get("body", []):
@@ -151,6 +131,7 @@ class SuggestBounties(commands.Cog):
             github_schema=None, # YAML schema for issue template
             github_template=None, # Template format string
             auto_suggestions_enabled=True, # Toggle for automatic suggestion processing
+            reason_keyword=None, # Optional keyword to require in Reason field (case-insensitive)
         )
         self.log = logging.getLogger(f"red.{__name__}")
         # Placeholder for any startup logic, such as loading cache or setting up background tasks
@@ -159,7 +140,7 @@ class SuggestBounties(commands.Cog):
         """Replace wildcards in template text with actual values"""
         if not text:
             return text
-        
+
         replacements = {
             "{suggestion_name}": suggestion_name,
             "{suggestion_number}": suggestion_number,
@@ -167,11 +148,11 @@ class SuggestBounties(commands.Cog):
             "{issue_body}": issue_body,
             "{suggesting_user}": suggesting_user,
         }
-        
+
         result = text
         for wildcard, value in replacements.items():
             result = result.replace(wildcard, value)
-        
+
         return result
 
     @commands.group() # type: ignore
@@ -180,8 +161,7 @@ class SuggestBounties(commands.Cog):
         """
         Configuration commands for SuggestBounties.
         """
-        if ctx.invoked_subcommand is None:
-            return await ctx.send_help()
+        pass
 
     @suggestbountyset.command()
     async def repo(self, ctx: commands.Context, repo: str):
@@ -205,9 +185,17 @@ class SuggestBounties(commands.Cog):
         """
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
+            try:
+                await ctx.message.delete()
+            except Exception:
+                pass
             return
         if not (len(token) >= 40 and re.match(r"^[a-zA-Z0-9_\-]+$", token)):
             await ctx.send("❌ Invalid token format. Please check your token.")
+            try:
+                await ctx.message.delete()
+            except Exception:
+                pass
             return
         # Validate the token using PyGithub
         try:
@@ -216,13 +204,26 @@ class SuggestBounties(commands.Cog):
             _ = user.login  # This will raise if the token is invalid
         except GithubException:
             await ctx.send("❌ Token validation failed. Please check your token.")
+            try:
+                await ctx.message.delete()
+            except Exception:
+                pass
             return
         except Exception:
             await ctx.send("❌ An error occurred while validating the token.")
+            try:
+                await ctx.message.delete()
+            except Exception:
+                pass
             return
         await self.config.guild(ctx.guild).github_token.set(token)
         await ctx.send("✅ GitHub token set and validated.")
         await ctx.tick()
+        # Attempt to delete the invoking message to avoid leaking sensitive data
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
 
     @suggestbountyset.command(name="channel")
     async def suggestion_channel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -269,23 +270,23 @@ class SuggestBounties(commands.Cog):
             await self.config.guild(ctx.guild).github_schema.set(content.decode())
             await self.config.guild(ctx.guild).github_template.set(str(responses))
             await interaction.response.send_message("Template and schema saved!", ephemeral=True)
-            
+
             # Edit the original message to show completion and remove buttons
             try:
                 # Clear the view to remove buttons and stop the timer
                 view.clear_items()
                 view.stop()
-                
+
                 success_message = (
                     "✅ **Template and schema saved successfully!**\n\n"
                     "Your GitHub issue template has been configured and is ready to use. "
                     "When approved suggestions are detected, they will automatically be converted to GitHub issues using your template."
                 )
-                
+
                 await message.edit(content=success_message, view=view)
             except Exception as e:
                 pass
-            
+
             try:
                 await ctx.tick()
             except Exception as e:
@@ -295,17 +296,17 @@ class SuggestBounties(commands.Cog):
             try:
                 view.clear_items()
                 view.stop()
-                
+
                 cancel_message = (
                     "❌ **Template configuration cancelled.**\n\n"
                     "No changes were made to your configuration. "
                     "Run the command again if you want to set up the template."
                 )
-                
+
                 await message.edit(content=cancel_message, view=view)
             except Exception as e:
                 pass
-        
+
         # Create the instruction message with wildcard information
         instructions = (
             "Configure your template using the form that matches your GitHub schema.\n\n"
@@ -318,11 +319,10 @@ class SuggestBounties(commands.Cog):
             "{suggesting_user}    - The user who made the suggestion\n"
             "```\n"
             "**Example:** `Bounty for {suggestion_name} - See {message_link}`\n"
-            "**Note:** Fields like `suggestion-link` and `about-bounty` are auto-filled if not provided.\n"
-            "⏰ This configuration will timeout in 1 minute."
+            "**Note:** Fields like `suggestion-link` and `about-bounty` are auto-filled if not provided."
         )
-        
-        view = TemplateConfigView(schema, on_confirm, on_cancel)
+
+        view = TemplateConfigView(schema, on_confirm, on_cancel, author_id=ctx.author.id)
         message = await ctx.send(instructions, view=view)
         view.message = message
 
@@ -340,19 +340,21 @@ class SuggestBounties(commands.Cog):
         channel_id = data.get("suggestion_channel")
         channel = ctx.guild.get_channel(channel_id) if channel_id else None
         channel_display = channel.mention if channel else "Not set"
-        
+
         schema = data.get("github_schema")
         template = data.get("github_template")
         auto_enabled = data.get("auto_suggestions_enabled", True)
-        
+        reason_keyword = data.get("reason_keyword")
+
         embed = discord.Embed(title="SuggestBounties Configuration", color=await ctx.embed_color())
         embed.add_field(name="GitHub Repo", value=repo, inline=False)
         embed.add_field(name="GitHub Token", value=token, inline=False)
         embed.add_field(name="Suggestion Channel", value=channel_display, inline=False)
         embed.add_field(name="Auto Suggestions", value="✅ Enabled" if auto_enabled else "❌ Disabled", inline=False)
+        embed.add_field(name="Reason Flag", value=reason_keyword or "Not set", inline=False)
         embed.add_field(name="GitHub Schema", value="Set (see attached file)" if schema else "Not set", inline=False)
         embed.add_field(name="GitHub Template", value="Set (see attached file)" if template else "Not set", inline=False)
-        
+
         files = []
         if schema:
             schema_file = discord.File(
@@ -360,15 +362,38 @@ class SuggestBounties(commands.Cog):
                 filename="github_schema.yml"
             )
             files.append(schema_file)
-        
+
         if template:
             template_file = discord.File(
                 fp=io.BytesIO(template.encode('utf-8')),
                 filename="github_template.txt"
             )
             files.append(template_file)
-        
+
         await ctx.send(embed=embed, files=files)
+        await ctx.tick()
+
+    @suggestbountyset.command(name="reasonflag")
+    async def reasonflag(self, ctx: commands.Context, *, keyword: Optional[str] = None):
+        """
+        Set or clear the required keyword in the Reason field to allow sending to GitHub.
+
+        - Provide a keyword (e.g. "[BOUNTY]") to require it in the Reason field (case-insensitive).
+        - Call without a keyword to clear this requirement.
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        if keyword is None or not keyword.strip():
+            await self.config.guild(ctx.guild).reason_keyword.clear()
+            await ctx.send("✅ Reason flag cleared. All approved suggestions will be processed.")
+            await ctx.tick()
+            return
+
+        value = keyword.strip()
+        await self.config.guild(ctx.guild).reason_keyword.set(value)
+        await ctx.send(f"✅ Reason flag set. Only approved suggestions with '{value}' in the Reason field will be processed.")
         await ctx.tick()
 
     @suggestbountyset.command()
@@ -379,11 +404,11 @@ class SuggestBounties(commands.Cog):
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
             return
-        
+
         current_state = await self.config.guild(ctx.guild).auto_suggestions_enabled()
         new_state = not current_state
         await self.config.guild(ctx.guild).auto_suggestions_enabled.set(new_state)
-        
+
         status = "✅ enabled" if new_state else "❌ disabled"
         await ctx.send(f"Automatic suggestion processing is now {status}.")
         await ctx.tick()
@@ -393,12 +418,12 @@ class SuggestBounties(commands.Cog):
         if not message.guild:
             return
         config = self.config.guild(message.guild)
-        
+
         # Check if automatic suggestions are enabled
         auto_enabled = await config.auto_suggestions_enabled()
         if not auto_enabled:
             return
-            
+
         suggestion_channel_id = await config.suggestion_channel()
         if not suggestion_channel_id or message.channel.id != suggestion_channel_id:
             return
@@ -413,20 +438,26 @@ class SuggestBounties(commands.Cog):
         if not embed.title or embed.title != "Approved Suggestion":
             return
         suggestion_text = embed.description.strip() if embed.description else ""
-        
+
         # Parse embed fields for Reason and Results
         reason_text = None
         results_text = None
-        
+
         for field in embed.fields:
             if field.name == "Reason" and field.value:
                 reason_text = field.value.strip()
             elif field.name == "Results" and field.value:
                 results_text = field.value.strip()
-        
+
         if not results_text:
             return
-        
+
+        # If a reason keyword is configured, ensure it exists in the Reason field (case-insensitive)
+        reason_keyword = await config.reason_keyword()
+        if reason_keyword:
+            if not reason_text or reason_keyword.lower() not in reason_text.lower():
+                return
+
         # Extract suggesting user from embed footer
         suggesting_user = ""
         if embed.footer and embed.footer.text:
@@ -434,7 +465,7 @@ class SuggestBounties(commands.Cog):
             footer_match = re.search(r"Suggested by (.+?) \(\d+\)", embed.footer.text)
             if footer_match:
                 suggesting_user = footer_match.group(1)
-        
+
         # Compose issue body
         issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
         if reason_text:
@@ -456,7 +487,7 @@ class SuggestBounties(commands.Cog):
                 template_responses = ast.literal_eval(template)
             except Exception as e:
                 template_responses = {}
-            
+
             # Build issue body from schema, using template responses and auto-filled values
             # Only include textarea and input fields, skip markdown sections
             body_md = ""
@@ -467,7 +498,7 @@ class SuggestBounties(commands.Cog):
                 elif item.get("type") in ("textarea", "input"):
                     field_id = item.get("id")
                     label = item["attributes"].get("label", field_id)
-                    
+
                     # Use template response if available, otherwise auto-fill
                     if field_id in template_responses:
                         value = template_responses[field_id]
@@ -479,16 +510,16 @@ class SuggestBounties(commands.Cog):
                         value = issue_body
                     else:
                         value = ""
-                    
+
                     # Only add the field if it has content
                     if value.strip():
                         body_md += f"### {label}\n\n{value}\n\n"
-            
+
             # Use template title if available, otherwise schema default, and replace wildcards
             title = template_responses.get("title", schema.get("title", suggestion_name))
             title = self._replace_wildcards(title, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
             labels = schema.get("labels", [])
-            
+
             try:
                 gh = Github(token)
                 repo = gh.get_repo(repo_name)
