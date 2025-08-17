@@ -267,7 +267,7 @@ class SChangelog(commands.Cog):
         embed.set_thumbnail(url=guildpic)
 
         if num_authors == 0:
-            return await channel.send(role.mention if role else "", embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
+            return await channel.send("", embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
 
         # Build fields grouped by author across the whole window
         for author, tags in aggregated_by_author.items():
