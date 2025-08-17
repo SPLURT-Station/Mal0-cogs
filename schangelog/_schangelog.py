@@ -1,7 +1,7 @@
 #General imports
 import random
-import requests
-import yaml
+import requests  # type: ignore[import]
+import yaml  # type: ignore[import]
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -204,9 +204,54 @@ class SChangelog(commands.Cog):
         await self.config.guild(ctx.guild).cached.set(new_cache)
         return len(window_data), list({day[:7] for day in window_data.keys()})
 
+    def _build_fields_from_aggregated(self, aggregated_by_author: Dict[str, Dict[str, List[str]]]) -> List[Tuple[str, str]]:
+        # Convert aggregated author->tag->[entries] mapping into a list of (field_name, field_value)
+        fields: List[Tuple[str, str]] = []
+        for author, tags in aggregated_by_author.items():
+            shown_name = author
+            content = ""
+            for tag, entries in tags.items():
+                content += f"\n{tag}: "
+                for entry in entries:
+                    if len(content + "\n  - " + entry) > 1014:
+                        fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
+                        content = f"\n{tag}: "
+                        shown_name = "\u200b"
+                    content += "\n  - " + entry
+            if content.strip():
+                fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
+        return fields
+
+    def _new_base_embed(self, ctx: commands.Context, guild: discord.Guild, title: str, description: str, eColor: Tuple[int, int, int], footer: str, author_url: Optional[str]) -> discord.Embed:
+        guildpic = guild.icon
+        embed = discord.Embed(title=title, description=description, color=discord.Colour.from_rgb(*eColor), timestamp=discord.utils.utcnow())
+        embed.set_author(name=f"{guild.name}'s Changelogs", url=author_url, icon_url=guildpic)
+        embed.set_footer(text=footer, icon_url=ctx.me.avatar)
+        embed.set_thumbnail(url=guildpic)
+        return embed
+
+    def _paginate_embeds(self, ctx: commands.Context, guild: discord.Guild, base_title: str, base_description: str, eColor: Tuple[int, int, int], footer: str, author_url: Optional[str], fields: List[Tuple[str, str]]) -> List[discord.Embed]:
+        # Build a list of embeds, each under Discord's 6000 character limit and 25 fields
+        pages: List[discord.Embed] = []
+        current = self._new_base_embed(ctx, guild, base_title, base_description, eColor, footer, author_url)
+        field_count = 0
+        for name, value in fields:
+            # If adding this field would exceed limits, start a new page
+            if field_count >= 25 or (len(current) + len(str(name)) + len(str(value)) > 5900):
+                pages.append(current)
+                # continued title for subsequent pages
+                current = self._new_base_embed(ctx, guild, f"{base_title} (cont.)", base_description, eColor, footer, author_url)
+                field_count = 0
+            current.add_field(name=name, value=value, inline=False)
+            field_count += 1
+        # Always append the last embed, even if it has zero fields (header-only)
+        pages.append(current)
+        return pages
+
     async def _send_diff_embed_for_window(self, ctx: commands.Context, ping_enabled: bool, ref_day: str):
         now = date.today()
         guild = ctx.guild
+        assert guild is not None
         guildpic = guild.icon
         footers = await self.config.guild(guild).footer_lines()
         eColor = await self.config.guild(guild).embed_color()
@@ -261,30 +306,17 @@ class SChangelog(commands.Cog):
 
         description = f"There were **{num_authors}** active changelogs."
 
-        embed = discord.Embed(title=embedTitle, description=description, color=discord.Colour.from_rgb(*eColor), timestamp=discord.utils.utcnow())
-        embed.set_author(name=f"{guild.name}'s Changelogs", url=author_url, icon_url=guildpic)
-        embed.set_footer(text=footer, icon_url=ctx.me.avatar)
-        embed.set_thumbnail(url=guildpic)
-
         if num_authors == 0:
-            return await channel.send("", embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
+            empty_embed = self._new_base_embed(ctx, guild, embedTitle, description, eColor, footer, author_url)
+            return await channel.send("", embed=empty_embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
 
-        # Build fields grouped by author across the whole window
-        for author, tags in aggregated_by_author.items():
-            shown_name = author
-            content = ""
-            for tag, entries in tags.items():
-                content += f"\n{tag}: "
-                for entry in entries:
-                    if len(content + "\n  - " + entry) > 1014:
-                        embed.add_field(name=shown_name, value=chat_formatting.box(content.strip(), "yaml"), inline=False)
-                        content = f"\n{tag}: "
-                        shown_name = "\u200b"
-                    content += "\n  - " + entry
-            if content.strip():
-                embed.add_field(name=shown_name, value=chat_formatting.box(content.strip(), "yaml"), inline=False)
+        # Build fields and paginate across multiple embeds if necessary
+        fields = self._build_fields_from_aggregated(aggregated_by_author)
+        pages = self._paginate_embeds(ctx, guild, embedTitle, description, eColor, footer, author_url, fields)
 
-        await channel.send(role.mention if role else "", embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
+        # Send pages one-by-one, mentioning role only on the first message
+        for idx, page in enumerate(pages):
+            await channel.send(role.mention if (role and idx == 0) else "", embed=page, allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True, replied_user=True))
 
     async def _update_cache_range(self, ctx: commands.Context, start_date: date, end_date: date) -> Tuple[int, List[str]]:
         # Returns (num_days_updated, months_processed)
@@ -334,6 +366,7 @@ class SChangelog(commands.Cog):
         """
         if ctx.invoked_subcommand is None:
             guild = ctx.guild
+            assert guild is not None
             sources = await self.config.guild(guild).sources()
             eColor = await self.config.guild(guild).embed_color()
             role_id = await self.config.guild(guild).mentionrole()
@@ -550,6 +583,10 @@ class SChangelog(commands.Cog):
 
     async def _build_day_menu_embed(self, ctx: commands.Context, daydate: date, data_by_author: Dict[str, Dict[str, List[str]]]) -> discord.Embed:
         guild = ctx.guild
+        if guild is None:
+            # Fallback: minimal embed
+            return discord.Embed(title="Changelogs Menu", description="No guild context.")
+        assert guild is not None
         guildpic = guild.icon
         eColor = await self.config.guild(guild).embed_color()
         footers = await self.config.guild(guild).footer_lines()
@@ -576,19 +613,17 @@ class SChangelog(commands.Cog):
             embed.add_field(name="No entries", value=chat_formatting.box("No changelogs found for this day.", "yaml"), inline=False)
             return embed
 
-        for author, tags in data_by_author.items():
-            shown_name = author
-            content = ""
-            for tag, entries in tags.items():
-                content += f"\n{tag}: "
-                for entry in entries:
-                    if len(content + "\n  - " + entry) > 1014:
-                        embed.add_field(name=shown_name, value=chat_formatting.box(content.strip(), "yaml"), inline=False)
-                        content = f"\n{tag}: "
-                        shown_name = "\u200b"
-                    content += "\n  - " + entry
-            if content.strip():
-                embed.add_field(name=shown_name, value=chat_formatting.box(content.strip(), "yaml"), inline=False)
+        # Add fields while respecting embed total size. If it would overflow, truncate with a summary field.
+        remaining_fields = self._build_fields_from_aggregated(data_by_author)
+        added = 0
+        for name, value in remaining_fields:
+            if added >= 25 or (len(embed) + len(str(name)) + len(str(value)) > 5900):
+                hidden = len(remaining_fields) - added
+                if hidden > 0:
+                    embed.add_field(name="More…", value=f"{hidden} additional field(s) not shown due to embed limits.", inline=False)
+                break
+            embed.add_field(name=name, value=value, inline=False)
+            added += 1
         return embed
 
     @schangelog.command(name="menu")
@@ -603,6 +638,7 @@ class SChangelog(commands.Cog):
             current_day = date.today()
         else:
             try:
+                assert day is not None
                 current_day = datetime.strptime(day, "%Y-%m-%d").date()
             except Exception:
                 await ctx.send("That's not a valid date, dummy")
