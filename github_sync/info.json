@@ -1,0 +1,24 @@
+{
+    "author": [
+        "Mal0"
+    ],
+    "install_msg": "GitHub Sync cog installed. Use [p]ghsyncset to configure tokens, repo, and forum channels.",
+    "name": "GitHubSync",
+    "short": "Sync GitHub issues and PRs with Discord forum posts.",
+    "description": "Creates forum posts for GitHub issues and pull requests, and syncs comments and tags both ways. Uses GraphQL for fast GitHub API access.",
+    "tags": [
+        "github",
+        "sync",
+        "issues",
+        "pull requests",
+        "forum"
+    ],
+    "hidden": false,
+    "disabled": false,
+    "requirements": [
+        "PyGithub",
+        "aiohttp"
+    ],
+    "min_bot_version": "3.5.0",
+    "end_user_data_statement": "This cog stores configuration like channel IDs and GitHub repository metadata. It does not store personal data beyond what Discord inherently provides."
+}
