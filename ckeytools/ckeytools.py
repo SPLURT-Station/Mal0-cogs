@@ -14,6 +14,7 @@ from .helpers import normalise_to_ckey
 from .database import DatabaseManager
 import tomlkit
 
+
 class CkeyTools(commands.Cog):
     """
     A cog for managing SS13 server integrations with Discord.
@@ -1657,8 +1658,12 @@ class CkeyTools(commands.Cog):
             await ctx.send("❌ Error checking verification status.")
 
     @verify.command()
-    async def ckeys(self, ctx, user: discord.Member):
-        """List all past ckeys this Discord user has verified with."""
+    async def ckeys(self, ctx, user: discord.User):
+        """List all past ckeys this Discord user has verified with.
+
+        Args:
+            user: Discord user (works for users both in and outside the server)
+        """
         if not self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("❌ Database is not connected.")
             return
@@ -1719,7 +1724,7 @@ class CkeyTools(commands.Cog):
                 await message.edit(content=None, embed=embed)
 
             except Exception as e:
-                self.log.error(f"Error getting ckeys for user {user}: {e}")
+                self.log.error(f"Error getting ckeys for user {user.id}: {e}")
                 await message.edit(content="❌ Error retrieving ckey history.")
 
     @verify.command()
