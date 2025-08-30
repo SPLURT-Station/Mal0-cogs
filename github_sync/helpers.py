@@ -27,5 +27,3 @@ def build_discord_message_prefix(
     if author_url:
         return f"**[{author_name}]({author_url})**\n\n"
     return f"**{author_name}**\n\n"
-
-

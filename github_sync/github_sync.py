@@ -5887,4 +5887,3 @@ class GitHubSync(commands.Cog):
         # PyGithub doesn't expose GraphQL deleteIssue; use REST fallback: close issue via node lookup is non-trivial
         # Best-effort: this will be a no-op unless extended with a GraphQL client.
         return
-
