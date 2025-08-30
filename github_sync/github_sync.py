@@ -688,7 +688,7 @@ class GitHubSync(commands.Cog):
         if not self._batch_config_mode:
             return
 
-        self.log.info("Ending batch config mode, applying %d pending updates", len(self._pending_config_updates))
+        self.log.debug("Ending batch config mode, applying %d pending updates", len(self._pending_config_updates))
 
         try:
             # Group updates by config type for efficiency
@@ -719,7 +719,7 @@ class GitHubSync(commands.Cog):
                     for key, value in data.items():
                         await config_obj.set_raw(key, value=value)
 
-            self.log.info("Successfully applied %d batched config updates", len(self._pending_config_updates))
+            self.log.debug("Successfully applied %d batched config updates", len(self._pending_config_updates))
 
         except Exception as e:
             self.log.exception("Failed to apply batched config updates: %s", e)
@@ -921,7 +921,7 @@ class GitHubSync(commands.Cog):
                 if thread:
                     try:
                         await thread.delete()
-                        self.log.info("Deleted Discord thread for closed issue #%s", number)
+                        self.log.debug("Deleted Discord thread for closed issue #%s", number)
                         deleted_count += 1
                         
                         # Clean up stored data
@@ -943,7 +943,7 @@ class GitHubSync(commands.Cog):
                 if thread:
                     try:
                         await thread.delete()
-                        self.log.info("Deleted Discord thread for closed/merged PR #%s", number)
+                        self.log.debug("Deleted Discord thread for closed/merged PR #%s", number)
                         deleted_count += 1
                         
                         # Clean up stored data
@@ -1082,7 +1082,7 @@ class GitHubSync(commands.Cog):
                                 
                         if thread:
                             await thread.delete()
-                            self.log.info("Deleted orphaned Discord thread for closed %s #%s", kind[:-1], number)
+                            self.log.debug("Deleted orphaned Discord thread for closed %s #%s", kind[:-1], number)
                             deleted_count += 1
                             
                             # Clean up stored data
@@ -1209,7 +1209,7 @@ class GitHubSync(commands.Cog):
             return
         await self.config.guild(ctx.guild).github_owner.set(owner)
         await self.config.guild(ctx.guild).github_repo.set(repo)
-        self.log.info("Repo configured to %s/%s (guild=%s)", owner, repo, getattr(ctx.guild, 'id', None))
+        self.log.debug("Repo configured to %s/%s (guild=%s)", owner, repo, getattr(ctx.guild, 'id', None))
         await ctx.send(f"✅ Repository set to `{owner}/{repo}`.")
 
     @ghsyncset.command(name="issues_forum")
@@ -1219,7 +1219,7 @@ class GitHubSync(commands.Cog):
             await ctx.send("Run this in a guild.")
             return
         await self.config.custom("issues", ctx.guild.id).forum_channel.set(channel.id)
-        self.log.info("Issues forum set: %s (%s) guild=%s", channel.name, channel.id, ctx.guild.id)
+        self.log.debug("Issues forum set: %s (%s) guild=%s", channel.name, channel.id, ctx.guild.id)
         await ctx.send(f"✅ Issues forum set to {channel.mention}.")
         # Ensure status tags exist and reconcile tag/label sets immediately
         await self._ensure_status_tags_exist(channel, "issues")
@@ -1234,7 +1234,7 @@ class GitHubSync(commands.Cog):
             await ctx.send("Run this in a guild.")
             return
         await self.config.custom("prs", ctx.guild.id).forum_channel.set(channel.id)
-        self.log.info("PRs forum set: %s (%s) guild=%s", channel.name, channel.id, ctx.guild.id)
+        self.log.debug("PRs forum set: %s (%s) guild=%s", channel.name, channel.id, ctx.guild.id)
         await ctx.send(f"✅ PRs forum set to {channel.mention}.")
         # Ensure status tags exist and reconcile tag/label sets immediately
         await self._ensure_status_tags_exist(channel, "prs")
@@ -1289,6 +1289,58 @@ class GitHubSync(commands.Cog):
 
         if self.github_poll_task.is_running():
             embed.add_field(name="Active Task Interval", value=f"{self.github_poll_task.seconds}s", inline=True)
+            
+            # Add enhanced task information
+            next_iteration = self.github_poll_task.next_iteration
+            if next_iteration:
+                embed.add_field(name="Next Run", value=f"<t:{int(next_iteration.timestamp())}:R>", inline=True)
+            
+            # Count enabled guilds
+            enabled_count = 0
+            for guild in self.bot.guilds:
+                try:
+                    if await self.config.guild(guild).poll_enabled():
+                        enabled_count += 1
+                except Exception:
+                    continue
+            embed.add_field(name="Enabled Guilds", value=str(enabled_count), inline=True)
+
+        # Add forum tags status information
+        issues_forum_obj = ctx.guild.get_channel(issues_forum) if issues_forum else None
+        prs_forum_obj = ctx.guild.get_channel(prs_forum) if prs_forum else None
+        
+        for forum, kind, forum_name in [(issues_forum_obj, "Issues", "Issues Forum"), (prs_forum_obj, "PRs", "PRs Forum")]:
+            if not isinstance(forum, discord.ForumChannel):
+                embed.add_field(name=f"{forum_name} Tags", value="Not configured", inline=False)
+                continue
+
+            current_tags = [t.name for t in forum.available_tags]
+            required_tags = self._required_issue_tags if kind == "Issues" else self._required_pr_tags
+            existing_status_tags = [t for t in current_tags if t.lower() in {r.lower() for r in required_tags}]
+            missing_status_tags = [t for t in required_tags if t.lower() not in {c.lower() for c in current_tags}]
+            non_status_tags = [t for t in current_tags if t.lower() not in self._status_tag_names]
+
+            value = f"**Current tags:** {len(current_tags)}/20\n"
+            if existing_status_tags:
+                value += f"**Status tags present:** {', '.join(existing_status_tags)}\n"
+            if missing_status_tags:
+                value += f"**Missing status tags:** {', '.join(missing_status_tags)}\n"
+
+            if len(current_tags) + len(missing_status_tags) > 20:
+                value += f"⚠️ **Tag limit issue:** Need to remove {len(current_tags) + len(missing_status_tags) - 20} existing tags\n"
+                if non_status_tags:
+                    removable = non_status_tags[:3]  # Show first 3
+                    value += f"**Removable tags:** {', '.join(removable)}"
+                    if len(non_status_tags) > 3:
+                        value += f" (+{len(non_status_tags) - 3} more)"
+            elif missing_status_tags:
+                value += "✅ **Can create missing tags**"
+            else:
+                value += "✅ **All status tags present**"
+
+            embed.add_field(name=f"{forum_name} Tags ({forum.name})", value=value, inline=False)
+
+        embed.set_footer(text="Required status tags: Issues (open) | PRs (open)")
 
         # Add enhanced snapshot information if detailed=True
         if detailed:
@@ -1396,82 +1448,7 @@ class GitHubSync(commands.Cog):
             # Just show current settings
             await ctx.tick()
 
-    @ghsyncset.command(name="task")
-    async def ghsyncset_task(self, ctx: commands.Context, action: Optional[str] = None) -> None:
-        """
-        Control the background polling task.
 
-        Actions:
-            start   - Start the polling task
-            stop    - Stop the polling task
-            restart - Restart the polling task
-            status  - Show task status (default)
-        """
-        if not ctx.guild:
-            await ctx.send("Run this in a guild.")
-            return
-
-        if action is None or action.lower() == "status":
-            # Show task status
-            is_running = self.github_poll_task.is_running()
-            status = "🟢 Running" if is_running else "🔴 Stopped"
-
-            embed = discord.Embed(
-                title="📊 Polling Task Status",
-                color=discord.Color.green() if is_running else discord.Color.red()
-            )
-            embed.add_field(name="Status", value=status, inline=True)
-
-            if is_running:
-                embed.add_field(name="Current Interval", value=f"{self.github_poll_task.seconds}s", inline=True)
-
-                next_iteration = self.github_poll_task.next_iteration
-                if next_iteration:
-                    embed.add_field(name="Next Run", value=f"<t:{int(next_iteration.timestamp())}:R>", inline=True)
-                else:
-                    embed.add_field(name="Next Run", value="Unknown", inline=True)
-
-                # Count enabled guilds
-                enabled_count = 0
-                for guild in self.bot.guilds:
-                    try:
-                        if await self.config.guild(guild).poll_enabled():
-                            enabled_count += 1
-                    except Exception:
-                        continue
-
-                embed.add_field(name="Enabled Guilds", value=str(enabled_count), inline=True)
-
-            await ctx.send(embed=embed)
-            return
-
-        action = action.lower()
-
-        if action == "start":
-            if self.github_poll_task.is_running():
-                await ctx.send("❌ Polling task is already running.")
-                return
-
-            self.github_poll_task.start()
-            await ctx.send("✅ Polling task started.")
-
-        elif action == "stop":
-            if not self.github_poll_task.is_running():
-                await ctx.send("❌ Polling task is not running.")
-                return
-
-            self.github_poll_task.cancel()
-            await ctx.send("✅ Polling task stopped.")
-
-        elif action == "restart":
-            if self.github_poll_task.is_running():
-                self.github_poll_task.cancel()
-
-            self.github_poll_task.restart()
-            await ctx.send("✅ Polling task restarted.")
-
-        else:
-            await ctx.send("❌ Invalid action. Use `start`, `stop`, `restart`, or `status`.")
 
     @ghsyncset.command(name="test_batch", hidden=True)
     async def ghsyncset_test_batch(self, ctx: commands.Context) -> None:
@@ -1549,7 +1526,7 @@ class GitHubSync(commands.Cog):
             await ctx.send("Repo not configured or token invalid.")
             return
         await ctx.send("Starting full 5-step sync... This may take a while.")
-        self.log.info("Manual syncall triggered (guild=%s)", ctx.guild.id)
+        self.log.debug("Manual syncall triggered (guild=%s)", ctx.guild.id)
         try:
             # Force sync even if polling is disabled
             await self._sync_guild(ctx.guild, force=True)
@@ -1558,216 +1535,13 @@ class GitHubSync(commands.Cog):
             self.log.exception("syncall failed (guild=%s)", ctx.guild.id)
             await ctx.send("Sync failed. Check logs.")
 
-    @ghsyncset.command(name="fix_status_tags")
-    async def ghsyncset_fix_status_tags(self, ctx: commands.Context) -> None:
-        """Retroactively apply status tags (open/closed/merged/not resolved) to existing threads."""
-        if not ctx.guild:
-            await ctx.send("Run this in a guild.")
-            return
 
-        issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
-        prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
-        issues_forum = ctx.guild.get_channel(issues_forum_id) if issues_forum_id else None
-        prs_forum = ctx.guild.get_channel(prs_forum_id) if prs_forum_id else None
 
-        if not isinstance(issues_forum, discord.ForumChannel) and not isinstance(prs_forum, discord.ForumChannel):
-            await ctx.send("❌ No forum channels configured.")
-            return
 
-        await ctx.send("🔧 Applying status tags to existing threads...")
 
-        try:
-            # Get current snapshot to determine correct status for each issue/PR
-            repo = await self._get_repo(ctx.guild)
-            if not repo:
-                await ctx.send("❌ Repository not configured.")
-                return
 
-            snapshot = await self._build_github_snapshot(ctx.guild)
-            fixed_count = 0
 
-            # Fix issues forum
-            if isinstance(issues_forum, discord.ForumChannel):
-                await self._ensure_status_tags_exist(issues_forum, "issues")
-                async for thread in issues_forum.archived_threads(limit=None):
-                    await self._fix_thread_status_tags(thread, snapshot, "issues")
-                    fixed_count += 1
-                for thread in issues_forum.threads:
-                    await self._fix_thread_status_tags(thread, snapshot, "issues")
-                    fixed_count += 1
 
-            # Fix PRs forum
-            if isinstance(prs_forum, discord.ForumChannel):
-                await self._ensure_status_tags_exist(prs_forum, "prs")
-                async for thread in prs_forum.archived_threads(limit=None):
-                    await self._fix_thread_status_tags(thread, snapshot, "prs")
-                    fixed_count += 1
-                for thread in prs_forum.threads:
-                    await self._fix_thread_status_tags(thread, snapshot, "prs")
-                    fixed_count += 1
-
-            await ctx.send(f"✅ Applied status tags to {fixed_count} threads.")
-
-        except Exception:
-            self.log.exception("fix_status_tags failed")
-            await ctx.send("❌ Failed to apply status tags. Check logs.")
-
-    @ghsyncset.command(name="retry_failed")
-    async def ghsyncset_retry_failed(self, ctx: commands.Context) -> None:
-        """Retry creating threads for issues/PRs that don't have Discord threads yet."""
-        if not ctx.guild:
-            await ctx.send("Run this in a guild.")
-            return
-
-        repo = await self._get_repo(ctx.guild)
-        if not repo:
-            await ctx.send("❌ Repository not configured.")
-            return
-
-        await ctx.send("🔄 Checking for missing threads and retrying creation...")
-
-        try:
-            # Get current snapshot
-            snapshot = await self._build_github_snapshot(ctx.guild)
-            missing_count = 0
-
-            # Check issues
-            issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
-            if issues_forum_id:
-                for num_str in snapshot.get("issues", {}):
-                    thread_id = await self._get_thread_id_by_number(ctx.guild, number=int(num_str), kind="issues")
-                    if not thread_id:
-                        missing_count += 1
-
-            # Check PRs
-            prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
-            if prs_forum_id:
-                for num_str in snapshot.get("prs", {}):
-                    thread_id = await self._get_thread_id_by_number(ctx.guild, number=int(num_str), kind="prs")
-                    if not thread_id:
-                        missing_count += 1
-
-            if missing_count == 0:
-                await ctx.send("✅ No missing threads found.")
-                return
-
-            await ctx.send(f"Found {missing_count} missing threads. Attempting to create them...")
-
-            # Force a full 5-step sync which will attempt to create missing threads
-            await self._sync_guild(ctx.guild, force=True)
-            await ctx.send("✅ Retry completed. Check logs for any remaining failures.")
-
-        except Exception:
-            self.log.exception("retry_failed command failed")
-            await ctx.send("❌ Failed to retry thread creation. Check logs.")
-
-    @ghsyncset.command(name="show_tags")
-    async def ghsyncset_show_tags(self, ctx: commands.Context) -> None:
-        """Show current forum tags and status tag requirements."""
-        if not ctx.guild:
-            await ctx.send("Run this in a guild.")
-            return
-
-        issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
-        prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
-        issues_forum = ctx.guild.get_channel(issues_forum_id) if issues_forum_id else None
-        prs_forum = ctx.guild.get_channel(prs_forum_id) if prs_forum_id else None
-
-        embed = discord.Embed(title="Forum Tags Status", color=await ctx.embed_color())
-
-        for forum, kind in [(issues_forum, "Issues"), (prs_forum, "PRs")]:
-            if not isinstance(forum, discord.ForumChannel):
-                embed.add_field(name=f"{kind} Forum", value="Not configured", inline=False)
-                continue
-
-            current_tags = [t.name for t in forum.available_tags]
-            required_tags = self._required_issue_tags if kind == "Issues" else self._required_pr_tags
-            existing_status_tags = [t for t in current_tags if t.lower() in {r.lower() for r in required_tags}]
-            missing_status_tags = [t for t in required_tags if t.lower() not in {c.lower() for c in current_tags}]
-            non_status_tags = [t for t in current_tags if t.lower() not in self._status_tag_names]
-
-            value = f"**Current tags:** {len(current_tags)}/20\n"
-            if existing_status_tags:
-                value += f"**Status tags present:** {', '.join(existing_status_tags)}\n"
-            if missing_status_tags:
-                value += f"**Missing status tags:** {', '.join(missing_status_tags)}\n"
-
-            if len(current_tags) + len(missing_status_tags) > 20:
-                value += f"⚠️ **Tag limit issue:** Need to remove {len(current_tags) + len(missing_status_tags) - 20} existing tags\n"
-                if non_status_tags:
-                    removable = non_status_tags[:3]  # Show first 3
-                    value += f"**Removable tags:** {', '.join(removable)}"
-                    if len(non_status_tags) > 3:
-                        value += f" (+{len(non_status_tags) - 3} more)"
-            elif missing_status_tags:
-                value += "✅ **Can create missing tags**"
-            else:
-                value += "✅ **All status tags present**"
-
-            embed.add_field(name=f"{kind} Forum ({forum.name})", value=value, inline=False)
-
-        embed.set_footer(text="Required status tags: Issues (open, closed, not resolved) | PRs (open, closed, merged)")
-        await ctx.send(embed=embed)
-
-    @ghsyncset.command(name="init_state_hashes")
-    async def ghsyncset_init_state_hashes(self, ctx: commands.Context) -> None:
-        """Initialize state hashes for existing threads to prevent false positive updates."""
-        if not ctx.guild:
-            await ctx.send("Run this in a guild.")
-            return
-
-        repo = await self._get_repo(ctx.guild)
-        if not repo:
-            await ctx.send("❌ Repository not configured.")
-            return
-
-        await ctx.send("🔄 Initializing state hashes for existing threads...")
-
-        try:
-            # Get current snapshot
-            snapshot = await self._build_github_snapshot(ctx.guild)
-            initialized_count = 0
-
-            # Check forums
-            issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
-            prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
-            issues_forum = ctx.guild.get_channel(issues_forum_id) if issues_forum_id else None
-            prs_forum = ctx.guild.get_channel(prs_forum_id) if prs_forum_id else None
-
-            for forum, kind in [(issues_forum, "issues"), (prs_forum, "prs")]:
-                if not isinstance(forum, discord.ForumChannel):
-                    continue
-
-                entities = snapshot.get(kind, {})
-                if not entities:
-                    continue
-
-                for number_str, data in entities.items():
-                    # Check if thread exists and if hash is missing
-                    thread_id = await self._get_thread_id_by_number(ctx.guild, number=int(number_str), kind=kind)
-                    if thread_id:
-                        # Check if hash already exists
-                        stored_hashes = await self.config.custom("state_hashes", ctx.guild.id).get_raw(kind, default={})
-                        if number_str not in stored_hashes:
-                            # Initialize hash for this entity
-                            labels = data.get("labels", [])
-                            label_tags = self._labels_to_forum_tags(forum, labels)
-                            status_tags = self._get_status_tags_for_entity(forum, data, kind)
-                            
-                            # Combine tags, ensuring status tags have priority and we don't exceed Discord's 5-tag limit
-                            desired_tags = status_tags  # Status tags first (most important)
-                            for tag in label_tags:
-                                if tag.id not in {st.id for st in desired_tags} and len(desired_tags) < 5:
-                                    desired_tags.append(tag)
-
-                            await self._store_state_hash(ctx.guild, int(number_str), kind, data, desired_tags)
-                            initialized_count += 1
-
-            await ctx.send(f"✅ Initialized state hashes for {initialized_count} existing threads.")
-
-        except Exception:
-            self.log.exception("init_state_hashes failed")
-            await ctx.send("❌ Failed to initialize state hashes. Check logs.")
 
     @ghsyncset.command(name="clear")
     async def ghsyncset_clear(self, ctx: commands.Context, target: str = "snapshot") -> None:
@@ -1942,7 +1716,7 @@ class GitHubSync(commands.Cog):
             if target == "snapshot":
                 await self.config.custom("state", ctx.guild.id).clear()
                 cleared_items = ["snapshot"]
-                self.log.info("Cleared GitHub snapshot for guild %s (contained %d issues, %d PRs, %d labels)",
+                self.log.debug("Cleared GitHub snapshot for guild %s (contained %d issues, %d PRs, %d labels)",
                              ctx.guild.id, issues_count, prs_count, labels_count)
 
             elif target == "comments":
@@ -1956,7 +1730,7 @@ class GitHubSync(commands.Cog):
                                 await self.config.custom("content_hashes", ctx.guild.id).set_raw(kind, entity_num, value=entity_data)
 
                 cleared_items = ["comment hashes"]
-                self.log.info("Cleared %d comment hashes for guild %s", total_comment_hashes, ctx.guild.id)
+                self.log.debug("Cleared %d comment hashes for guild %s", total_comment_hashes, ctx.guild.id)
 
             elif target == "state":
                 # Get count before clearing
@@ -1966,7 +1740,7 @@ class GitHubSync(commands.Cog):
                 # Clear state hashes
                 await self.config.custom("state_hashes", ctx.guild.id).clear()
                 cleared_items = ["state hashes"]
-                self.log.info("Cleared %d state hashes for guild %s", total_state_hashes, ctx.guild.id)
+                self.log.debug("Cleared %d state hashes for guild %s", total_state_hashes, ctx.guild.id)
 
             else:  # full
                 await self.config.custom("state", ctx.guild.id).clear()
@@ -1975,7 +1749,7 @@ class GitHubSync(commands.Cog):
                 await self.config.custom("discord_messages", ctx.guild.id).clear()
                 await self.config.custom("content_origins", ctx.guild.id).clear()
                 cleared_items = ["snapshot", "content hashes", "state hashes", "message tracking", "origin tracking"]
-                self.log.info("Cleared all GitHub data for guild %s (contained %d issues, %d PRs, %d labels, %d comment hashes)",
+                self.log.debug("Cleared all GitHub data for guild %s (contained %d issues, %d PRs, %d labels, %d comment hashes)",
                              ctx.guild.id, issues_count, prs_count, labels_count, total_comment_hashes)
 
             success_title = f"✅ {clear_type} Complete"
@@ -2433,7 +2207,7 @@ class GitHubSync(commands.Cog):
                                     await self._store_link_by_number(thread, number, kind="issues")
                                     await self._restore_orphaned_thread_tracking(ctx.guild, thread, number, "issues")
                                     restored_count += 1
-                                    self.log.info("Restored mapping for issues thread %s (#%s)", thread.id, number)
+                                    self.log.debug("Restored mapping for issues thread %s (#%s)", thread.id, number)
                             except (ValueError, IndexError):
                                 continue  # Skip threads that don't match expected format
             
@@ -2455,7 +2229,7 @@ class GitHubSync(commands.Cog):
                                     await self._store_link_by_number(thread, number, kind="prs")
                                     await self._restore_orphaned_thread_tracking(ctx.guild, thread, number, "prs")
                                     restored_count += 1
-                                    self.log.info("Restored mapping for prs thread %s (#%s)", thread.id, number)
+                                    self.log.debug("Restored mapping for prs thread %s (#%s)", thread.id, number)
                             except (ValueError, IndexError):
                                 continue  # Skip threads that don't match expected format
             
@@ -2691,69 +2465,7 @@ class GitHubSync(commands.Cog):
             self.log.exception("test_review_comments command failed")
             await ctx.send("❌ Failed to test review comments. Check logs.")
 
-    @ghsyncset.command(name="fix_thread_states")
-    async def ghsyncset_fix_thread_states(self, ctx: commands.Context) -> None:
-        """Retroactively apply correct archived/locked states to all existing threads based on GitHub status."""
-        if not ctx.guild:
-            await ctx.send("Run this in a guild.")
-            return
 
-        issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
-        prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
-        issues_forum = ctx.guild.get_channel(issues_forum_id) if issues_forum_id else None
-        prs_forum = ctx.guild.get_channel(prs_forum_id) if prs_forum_id else None
-
-        if not isinstance(issues_forum, discord.ForumChannel) and not isinstance(prs_forum, discord.ForumChannel):
-            await ctx.send("❌ No forum channels configured.")
-            return
-
-        await ctx.send("🔧 Applying correct archived/locked states to all threads based on GitHub status...")
-
-        try:
-            # Get current snapshot to determine correct state for each issue/PR
-            repo = await self._get_repo(ctx.guild)
-            if not repo:
-                await ctx.send("❌ Repository not configured.")
-                return
-
-            snapshot = await self._build_github_snapshot(ctx.guild)
-            fixed_count = 0
-
-            # Fix issues forum threads
-            if isinstance(issues_forum, discord.ForumChannel):
-                self.log.info("Fixing thread states for issues forum")
-                # Check archived threads
-                async for thread in issues_forum.archived_threads(limit=None):
-                    await self._fix_thread_complete_state(thread, snapshot, "issues")
-                    fixed_count += 1
-                    await asyncio.sleep(0.1)  # Rate limit protection
-
-                # Check active threads
-                for thread in issues_forum.threads:
-                    await self._fix_thread_complete_state(thread, snapshot, "issues")
-                    fixed_count += 1
-                    await asyncio.sleep(0.1)  # Rate limit protection
-
-            # Fix PRs forum threads
-            if isinstance(prs_forum, discord.ForumChannel):
-                self.log.info("Fixing thread states for PRs forum")
-                # Check archived threads
-                async for thread in prs_forum.archived_threads(limit=None):
-                    await self._fix_thread_complete_state(thread, snapshot, "prs")
-                    fixed_count += 1
-                    await asyncio.sleep(0.1)  # Rate limit protection
-
-                # Check active threads
-                for thread in prs_forum.threads:
-                    await self._fix_thread_complete_state(thread, snapshot, "prs")
-                    fixed_count += 1
-                    await asyncio.sleep(0.1)  # Rate limit protection
-
-            await ctx.send(f"✅ Applied correct states to {fixed_count} threads.")
-
-        except Exception:
-            self.log.exception("fix_thread_states failed")
-            await ctx.send("❌ Failed to apply thread states. Check logs.")
 
     # ----------------------
     # Discord -> GitHub: listeners
@@ -2789,7 +2501,7 @@ class GitHubSync(commands.Cog):
                 if not number:
                     continue
                 kind = "issues" if thread.parent_id == issues_forum else "prs"
-                self.log.info("Auto-link thread %s -> %s #%s", thread.id, kind, number)
+                self.log.debug("Auto-link thread %s -> %s #%s", thread.id, kind, number)
                 await self._store_link(thread, url, kind=kind)
                 await self._store_link_by_number(thread, number, kind=kind)
                 await thread.send(f"Linked this thread to {url}")
@@ -2893,10 +2605,10 @@ class GitHubSync(commands.Cog):
             if kind == "issues":
                 github_issue = await asyncio.to_thread(lambda: repo.get_issue(number=issue_number))
                 await asyncio.to_thread(lambda: github_issue.edit(state="closed"))
-                self.log.info("Closed GitHub issue #%s due to Discord thread deletion", issue_number)
+                self.log.debug("Closed GitHub issue #%s due to Discord thread deletion", issue_number)
             else:
                 # Can't close PRs via API, just log it
-                self.log.info("Discord thread for PR #%s was deleted, but PRs cannot be closed via API", issue_number)
+                self.log.debug("Discord thread for PR #%s was deleted, but PRs cannot be closed via API", issue_number)
 
             # Clean up stored data
             await self._cleanup_entity_data(guild, issue_number, kind)
@@ -2993,10 +2705,10 @@ class GitHubSync(commands.Cog):
                 # Handle status changes
                 if "open" in status_tags:
                     github_issue.edit(state="open")
-                    self.log.info("Opened GitHub %s #%s from Discord status tag", kind, issue_number)
+                    self.log.debug("Opened GitHub %s #%s from Discord status tag", kind, issue_number)
                 elif "closed" in status_tags or "not resolved" in status_tags:
                     github_issue.edit(state="closed")
-                    self.log.info("Closed GitHub %s #%s from Discord status tag", kind, issue_number)
+                    self.log.debug("Closed GitHub %s #%s from Discord status tag", kind, issue_number)
                 elif "merged" in status_tags and kind == "prs":
                     # Cannot merge via API, but log the attempt
                     self.log.warning("Cannot merge PR #%s via API - status tag applied in Discord", issue_number)
@@ -3006,7 +2718,7 @@ class GitHubSync(commands.Cog):
                 # Discord-originated content: sync labels to GitHub
                 github_issue = repo.get_issue(number=issue_number)
                 github_issue.set_labels(*regular_labels)
-                self.log.info("Updated GitHub %s #%s labels to match Discord tags (Discord origin)", kind, issue_number)
+                self.log.debug("Updated GitHub %s #%s labels to match Discord tags (Discord origin)", kind, issue_number)
             elif not origin_data or origin_data.get("origin") == "github":
                 # GitHub-originated content: let GitHub → Discord sync handle it during next poll
                 self.log.debug("Skipping label sync for GitHub-originated %s #%s", kind, issue_number)
@@ -3029,7 +2741,7 @@ class GitHubSync(commands.Cog):
                 should_sync = True
 
             if should_sync:
-                self.log.info("User changed thread %s state (archived: %s→%s, locked: %s→%s), syncing to GitHub %s #%s",
+                self.log.debug("User changed thread %s state (archived: %s→%s, locked: %s→%s), syncing to GitHub %s #%s",
                             after.id, before.archived, after.archived, before.locked, after.locked, kind, issue_number)
 
                 github_issue = repo.get_issue(number=issue_number)
@@ -3037,15 +2749,15 @@ class GitHubSync(commands.Cog):
                 if before.archived != after.archived:
                     new_state = "closed" if after.archived else "open"
                     github_issue.edit(state=new_state)
-                    self.log.info("Updated GitHub %s #%s state to %s", kind, issue_number, new_state)
+                    self.log.debug("Updated GitHub %s #%s state to %s", kind, issue_number, new_state)
 
                 if before.locked != after.locked:
                     if after.locked:
                         github_issue.lock("off-topic")  # Use a generic lock reason
-                        self.log.info("Locked GitHub %s #%s", kind, issue_number)
+                        self.log.debug("Locked GitHub %s #%s", kind, issue_number)
                     else:
                         github_issue.unlock()
-                        self.log.info("Unlocked GitHub %s #%s", kind, issue_number)
+                        self.log.debug("Unlocked GitHub %s #%s", kind, issue_number)
 
         except Exception:
             self.log.exception("Failed to handle state changes for %s #%s", kind, issue_number)
@@ -3186,7 +2898,7 @@ class GitHubSync(commands.Cog):
             self.log.warning("Cannot sync guild %s: repository not configured", guild.id)
             return
 
-        self.log.info("Starting complete 5-step sync for guild %s (force=%s)", guild.id, force)
+        self.log.debug("Starting complete 5-step sync for guild %s (force=%s)", guild.id, force)
 
         try:
             # Start batch config mode to reduce file I/O during sync
@@ -3204,12 +2916,12 @@ class GitHubSync(commands.Cog):
             if cleanup_data:
                 deleted_count = await self._cleanup_closed_discord_threads(guild, cleanup_data)
                 if deleted_count > 0:
-                    self.log.info("Cleanup phase: Deleted %d Discord threads for closed GitHub entities", deleted_count)
+                    self.log.debug("Cleanup phase: Deleted %d Discord threads for closed GitHub entities", deleted_count)
 
             # ADDITIONAL CLEANUP: Check existing Discord threads for closed issues not in recent cleanup
             additional_deleted = await self._cleanup_orphaned_discord_threads(guild, snapshot)
             if additional_deleted > 0:
-                self.log.info("Additional cleanup: Deleted %d orphaned Discord threads", additional_deleted)
+                self.log.debug("Additional cleanup: Deleted %d orphaned Discord threads", additional_deleted)
 
             # Perform 5-step reconciliation to Discord (only for open entities)
             await self._reconcile_snapshot_to_discord(guild, repo, prev, snapshot)
@@ -3220,7 +2932,7 @@ class GitHubSync(commands.Cog):
             # Apply all batched config updates at once
             await self._end_batch_config_mode(guild)
 
-            self.log.info("Completed 5-step sync for guild %s", guild.id)
+            self.log.debug("Completed 5-step sync for guild %s", guild.id)
 
         except Exception:
             self.log.exception("Failed to sync guild %s", guild.id)
@@ -3285,7 +2997,7 @@ class GitHubSync(commands.Cog):
             prefix = f"#{number}:"
             for thread in forum.threads:
                 if thread.name.startswith(prefix):
-                    self.log.info("Found orphaned thread %s for %s #%s - restoring all tracking data", 
+                    self.log.debug("Found orphaned thread %s for %s #%s - restoring all tracking data", 
                                 thread.id, kind, number)
                     # Restore the mapping
                     await self._store_link_by_number(thread, number, kind=kind)
@@ -3659,7 +3371,7 @@ class GitHubSync(commands.Cog):
             start_time = time.time()
 
             # OPTIMIZED: Parallel fetching strategy for maximum speed
-            self.log.info("🚀 Starting optimized GraphQL fetch (100 issues + 100 PRs per call)")
+            self.log.debug("🚀 Starting optimized GraphQL fetch (100 issues + 100 PRs per call)")
 
             # Phase 1: Combined fetching while both have data
             issues_cursor = None
@@ -3820,7 +3532,7 @@ class GitHubSync(commands.Cog):
 
             # Log performance summary
             fetch_duration = time.time() - start_time
-            self.log.info("✅ Optimized fetch complete: %d issues, %d PRs in %.2fs (%d API calls, %.1f items/call)",
+            self.log.debug("✅ Optimized fetch complete: %d issues, %d PRs in %.2fs (%d API calls, %.1f items/call)",
                          len(all_issues), len(all_prs), fetch_duration, api_calls,
                          (len(all_issues) + len(all_prs)) / max(api_calls, 1))
 
@@ -4237,7 +3949,7 @@ class GitHubSync(commands.Cog):
         total_items = len(snapshot["issues"]) + len(snapshot["prs"])
         items_per_call = total_items / max(metadata.get("total_api_calls", 1), 1)
 
-        self.log.info(
+        self.log.debug(
             "✅ GitHub snapshot built: %d labels, %d issues, %d PRs, %d comments | "
             "%d API calls in %.2fs (%.1f items/call) | %d assignees, %d milestones",
             len(snapshot["labels"]), len(snapshot["issues"]), len(snapshot["prs"]),
@@ -4261,7 +3973,7 @@ class GitHubSync(commands.Cog):
         4. Sync comments
         5. Update forum post status (archived/locked)
         """
-        self.log.info("🔄 Starting 5-step reconciliation for guild %s", guild.id)
+        self.log.debug("🔄 Starting 5-step reconciliation for guild %s", guild.id)
 
         # Get forum channels
         issues_forum_id = await self.config.custom("issues", guild.id).forum_channel()
@@ -4280,7 +3992,7 @@ class GitHubSync(commands.Cog):
                 self.log.debug("No %s to process", kind)
                 continue
 
-            self.log.info("Processing %d %s in forum %s", len(cur[kind]), kind, forum.name)
+            self.log.debug("Processing %d %s in forum %s", len(cur[kind]), kind, forum.name)
 
             # Step 1: Ensure tag parity between Discord and GitHub
             await self._step1_ensure_tag_parity(guild, forum, repo, cur, kind)
@@ -4297,14 +4009,14 @@ class GitHubSync(commands.Cog):
             # Step 5: Update forum post status
             await self._step5_update_post_status(guild, forum, cur, kind)
 
-        self.log.info("✅ Completed 5-step reconciliation for guild %s", guild.id)
+        self.log.debug("✅ Completed 5-step reconciliation for guild %s", guild.id)
 
     # ----------------------
     # 5-Step Reconciliation Methods
     # ----------------------
     async def _step1_ensure_tag_parity(self, guild: discord.Guild, forum: discord.ForumChannel, repo, snapshot: Dict[str, Any], kind: str) -> None:
         """Step 1: Ensure parity between Discord and GitHub tags, with status tags first."""
-        self.log.info("📋 Step 1: Ensuring tag parity for %s forum", kind)
+        self.log.debug("📋 Step 1: Ensuring tag parity for %s forum", kind)
 
         # First, ensure status tags exist (required)
         await self._ensure_status_tags_exist(forum, kind)
@@ -4312,11 +4024,11 @@ class GitHubSync(commands.Cog):
         # Then reconcile with GitHub labels using snapshot data (no blocking calls)
         await self._reconcile_forum_and_labels_from_snapshot(guild, forum, snapshot)
 
-        self.log.info("✅ Step 1 completed for %s", kind)
+        self.log.debug("✅ Step 1 completed for %s", kind)
 
     async def _step2_create_missing_posts(self, guild: discord.Guild, forum: discord.ForumChannel, prev: Dict[str, Any], cur: Dict[str, Any], kind: str) -> None:
         """Step 2: Create forum posts for new GitHub issues/PRs."""
-        self.log.info("➕ Step 2: Creating missing forum posts for %s", kind)
+        self.log.debug("➕ Step 2: Creating missing forum posts for %s", kind)
 
         prev_entities = prev.get(kind, {}) if prev else {}
         cur_entities = cur.get(kind, {})
@@ -4331,7 +4043,7 @@ class GitHubSync(commands.Cog):
         # Special case: if there's no previous snapshot (first run), we need to be more careful
         # Only consider entities "new" if they don't already have Discord threads
         if not prev_entities:
-            self.log.info("No previous snapshot found - checking all entities against existing Discord threads")
+            self.log.debug("No previous snapshot found - checking all entities against existing Discord threads")
             truly_new_entities = {}
             for number_str, data in new_entities.items():
                 existing_thread = await self._find_existing_thread_for_issue(guild, int(number_str), kind)
@@ -4342,7 +4054,7 @@ class GitHubSync(commands.Cog):
             new_entities = truly_new_entities
 
         if not new_entities:
-            self.log.info("No new %s to create", kind)
+            self.log.debug("No new %s to create", kind)
             return
 
         # Sort entities by creation date to ensure chronological forum post creation (oldest first)
@@ -4351,7 +4063,7 @@ class GitHubSync(commands.Cog):
             key=lambda x: x[1].get("created_at", "")
         )
 
-        self.log.info("Found %d new %s to create: %s #%s (oldest) to %s #%s (newest)",
+        self.log.debug("Found %d new %s to create: %s #%s (oldest) to %s #%s (newest)",
                      len(sorted_entities),
                      kind,
                      kind[:-1], sorted_entities[0][0],  # Remove 's' from 'issues'/'prs'
@@ -4388,7 +4100,7 @@ class GitHubSync(commands.Cog):
             end_idx = min(start_idx + batch_size, len(sorted_entities))
             batch = sorted_entities[start_idx:end_idx]
             
-            self.log.info("Processing batch %d/%d: %s #%s to #%s (%d posts)",
+            self.log.debug("Processing batch %d/%d: %s #%s to #%s (%d posts)",
                          batch_num + 1, total_batches,
                          kind[:-1], batch[0][0], batch[-1][0], len(batch))
             
@@ -4401,18 +4113,18 @@ class GitHubSync(commands.Cog):
             created_count += batch_created
             
             if batch_created > 0:
-                self.log.info("Batch %d/%d completed: Created %d/%d posts (total: %d)",
+                self.log.debug("Batch %d/%d completed: Created %d/%d posts (total: %d)",
                              batch_num + 1, total_batches, batch_created, len(batch), created_count)
             
             # Small delay between batches to be gentle on Discord API
             if batch_num < total_batches - 1:  # Don't delay after the last batch
                 await asyncio.sleep(0.5)
 
-        self.log.info("✅ Step 2 completed: Created %d new %s posts", created_count, kind)
+        self.log.debug("✅ Step 2 completed: Created %d new %s posts", created_count, kind)
 
     async def _step3_edit_existing_posts(self, guild: discord.Guild, forum: discord.ForumChannel, prev: Dict[str, Any], cur: Dict[str, Any], kind: str) -> None:
         """Step 3: Edit existing forum posts that have changed."""
-        self.log.info("✏️ Step 3: Editing existing forum posts for %s", kind)
+        self.log.debug("✏️ Step 3: Editing existing forum posts for %s", kind)
 
         prev_entities = prev.get(kind, {})
         cur_entities = cur.get(kind, {})
@@ -4427,7 +4139,7 @@ class GitHubSync(commands.Cog):
                 entities_to_check.append((number_str, cur_data, prev_data))
 
         if not entities_to_check:
-            self.log.info("✅ Step 3 completed: No content changes detected, skipped all edits")
+            self.log.debug("✅ Step 3 completed: No content changes detected, skipped all edits")
             return
 
         self.log.debug("Step 3: Pre-screening found %d/%d entities with potential changes",
@@ -4480,11 +4192,11 @@ class GitHubSync(commands.Cog):
             if batch_num < total_batches - 1:
                 await asyncio.sleep(0.3)
 
-        self.log.info("✅ Step 3 completed: Edited %d existing %s posts", edited_count, kind)
+        self.log.debug("✅ Step 3 completed: Edited %d existing %s posts", edited_count, kind)
 
     async def _step4_sync_comments(self, guild: discord.Guild, forum: discord.ForumChannel, prev: Dict[str, Any], cur: Dict[str, Any], kind: str) -> None:
         """Step 4: Sync comments from GitHub to Discord."""
-        self.log.info("💬 Step 4: Syncing comments for %s", kind)
+        self.log.debug("💬 Step 4: Syncing comments for %s", kind)
 
         prev_entities = prev.get(kind, {})
         cur_entities = cur.get(kind, {})
@@ -4499,7 +4211,7 @@ class GitHubSync(commands.Cog):
                 entities_with_new_comments.append((number_str, cur_data, prev_data))
 
         if not entities_with_new_comments:
-            self.log.info("✅ Step 4 completed: No new comments detected, skipped comment sync")
+            self.log.debug("✅ Step 4 completed: No new comments detected, skipped comment sync")
             return
 
         self.log.debug("Step 4: Pre-screening found %d/%d entities with potential new comments",
@@ -4578,11 +4290,11 @@ class GitHubSync(commands.Cog):
             if batch_num < total_batches - 1:
                 await asyncio.sleep(0.3)
 
-        self.log.info("✅ Step 4 completed: Posted %d new comments", comment_count)
+        self.log.debug("✅ Step 4 completed: Posted %d new comments", comment_count)
 
     async def _step5_update_post_status(self, guild: discord.Guild, forum: discord.ForumChannel, snapshot: Dict[str, Any], kind: str) -> None:
         """Step 5: Update forum post status (archived/locked) based on GitHub state."""
-        self.log.info("📂 Step 5: Updating post status for %s", kind)
+        self.log.debug("📂 Step 5: Updating post status for %s", kind)
 
         entities = snapshot.get(kind, {})
 
@@ -4590,7 +4302,7 @@ class GitHubSync(commands.Cog):
         entities_needing_updates = await self._get_entities_with_state_changes(guild, forum, entities, kind)
 
         if not entities_needing_updates:
-            self.log.info("✅ Step 5 completed: No status changes detected via hash comparison, skipped all updates")
+            self.log.debug("✅ Step 5 completed: No status changes detected via hash comparison, skipped all updates")
             return
 
         self.log.debug("Step 5: Hash-based screening found %d/%d entities needing status updates",
@@ -4642,7 +4354,7 @@ class GitHubSync(commands.Cog):
             if batch_num < total_batches - 1:
                 await asyncio.sleep(0.3)
 
-        self.log.info("✅ Step 5 completed: Updated status for %d %s posts", updated_count, kind)
+        self.log.debug("✅ Step 5 completed: Updated status for %d %s posts", updated_count, kind)
 
     # ----------------------
     # Helper methods for the 5-step process
@@ -4651,7 +4363,7 @@ class GitHubSync(commands.Cog):
         """Create a new forum post for a GitHub issue/PR."""
         try:
             number = data["number"]
-            self.log.info("Creating forum post for %s #%s: %s", kind, number, data.get("title", ""))
+            self.log.debug("Creating forum post for %s #%s: %s", kind, number, data.get("title", ""))
 
             # Prepare content with avatar and organization info - include number at start
             title = self._format_forum_title(data, kind)
@@ -5276,7 +4988,7 @@ class GitHubSync(commands.Cog):
                     await self._store_link(thread, github_url, kind=kind)
                     await self._store_link_by_number(thread, number, kind=kind)
                     await self._store_origin(guild, number, kind, "github", None, None)
-                    self.log.info("Linked Discord thread %s to existing GitHub %s #%s", thread.id, kind, number)
+                    self.log.debug("Linked Discord thread %s to existing GitHub %s #%s", thread.id, kind, number)
                     return
 
             # Only create new GitHub issues for issues forum, not PRs
@@ -5315,7 +5027,7 @@ class GitHubSync(commands.Cog):
             # IMPORTANT: Invalidate state hash since new GitHub issue was created
             await self._invalidate_state_hash(guild, github_issue.number, kind)
 
-            self.log.info("Created GitHub issue #%s from Discord thread %s", github_issue.number, thread.id)
+            self.log.debug("Created GitHub issue #%s from Discord thread %s", github_issue.number, thread.id)
 
         except Exception:
             self.log.exception("Failed to handle new thread creation")
@@ -5371,7 +5083,7 @@ class GitHubSync(commands.Cog):
             # IMPORTANT: Invalidate state hash since GitHub state changed
             await self._invalidate_state_hash(guild, issue_number, kind)
 
-            self.log.info("Posted Discord comment %s as GitHub comment %s on %s #%s",
+            self.log.debug("Posted Discord comment %s as GitHub comment %s on %s #%s",
                          message.id, github_comment.id, kind, issue_number)
 
         except Exception:
@@ -5434,7 +5146,7 @@ class GitHubSync(commands.Cog):
             # IMPORTANT: Invalidate state hash since GitHub state changed
             await self._invalidate_state_hash(guild, issue_number, kind)
 
-            self.log.info("Updated GitHub comment %s from Discord edit %s on %s #%s",
+            self.log.debug("Updated GitHub comment %s from Discord edit %s on %s #%s",
                          github_comment_id, after.id, kind, issue_number)
 
         except Exception:
@@ -5497,7 +5209,7 @@ class GitHubSync(commands.Cog):
             # IMPORTANT: Invalidate state hash since GitHub state changed
             await self._invalidate_state_hash(guild, issue_number, kind)
 
-            self.log.info("Deleted GitHub comment %s from Discord deletion %s on %s #%s",
+            self.log.debug("Deleted GitHub comment %s from Discord deletion %s on %s #%s",
                          github_comment_id, message.id, kind, issue_number)
 
         except Exception:
@@ -5625,7 +5337,7 @@ class GitHubSync(commands.Cog):
 
                 if not thread:
                     # Create new thread
-                    self.log.info("Creating thread for %s #%s: %s", kind, number, data.get("title", ""))
+                    self.log.debug("Creating thread for %s #%s: %s", kind, number, data.get("title", ""))
                     try:
                         # Clean and validate title (Discord limit: 100 chars) - include number at start
                         title = self._format_forum_title(data, kind)
@@ -5717,7 +5429,7 @@ class GitHubSync(commands.Cog):
                 self.log.exception("Failed to reconcile %s #%s", kind, num_str)
                 continue
 
-        self.log.info("Reconciled %s: %d created, %d updated, %d failed", kind, created_count, updated_count, failed_count)
+        self.log.debug("Reconciled %s: %d created, %d updated, %d failed", kind, created_count, updated_count, failed_count)
 
     def _get_status_tags_for_entity(self, forum: discord.ForumChannel, data: Dict[str, Any], kind: str) -> List[discord.ForumTag]:
         """Get Discord-only status tags for an entity based on its state."""
@@ -6033,7 +5745,7 @@ class GitHubSync(commands.Cog):
                 # Try to suggest which tags could be removed
                 non_status_tags = [t.name for t in forum.available_tags if t.name.lower() not in self._status_tag_names]
                 if non_status_tags:
-                    self.log.info(
+                    self.log.debug(
                         "Consider removing some existing tags to make room for status tags. "
                         "Non-status tags: %s", non_status_tags[:5]  # Show first 5
                     )
@@ -6047,7 +5759,7 @@ class GitHubSync(commands.Cog):
                         color = discord.Color.green()
 
                     await forum.create_tag(name=tag_name, emoji=None, moderated=False)
-                    self.log.info("Created status tag '%s' in %s forum", tag_name, kind)
+                    self.log.debug("Created status tag '%s' in %s forum", tag_name, kind)
                 except discord.HTTPException as e:
                     if e.code == 50035 and "Must be 20 or fewer in length" in str(e):
                         self.log.error(
@@ -6124,7 +5836,7 @@ class GitHubSync(commands.Cog):
                     )
 
             if created_github_labels or created_discord_tags:
-                self.log.info("Tag sync: created %d GitHub labels, %d Discord tags",
+                self.log.debug("Tag sync: created %d GitHub labels, %d Discord tags",
                              created_github_labels, created_discord_tags)
             else:
                 self.log.debug("Tag sync: no changes needed")
