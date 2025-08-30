@@ -4,8 +4,8 @@
     ],
     "install_msg": "GitHub Sync cog installed. Use [p]ghsyncset to configure tokens, repo, and forum channels.",
     "name": "GitHubSync",
-    "short": "Sync GitHub issues and PRs with Discord forum posts.",
-    "description": "Creates forum posts for GitHub issues and pull requests, and syncs comments and tags both ways. Uses GraphQL for fast GitHub API access.",
+    "short": "Sync ACTIVE GitHub issues and PRs with Discord forum posts.",
+    "description": "Optimized sync for OPEN GitHub issues/PRs only. Creates forum posts, syncs comments/tags bidirectionally, and auto-deletes Discord threads when GitHub issues are closed. Uses GraphQL for fast API access.",
     "tags": [
         "github",
         "sync",

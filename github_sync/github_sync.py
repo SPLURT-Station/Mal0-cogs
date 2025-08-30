@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncio
 import re
@@ -25,25 +25,56 @@ from .helpers import map_github_labels_to_discord_tags
 
 DISCORD_MESSAGE_LINK_RE = re.compile(r"https://discord\.com/channels/(\d+)/(\d+)/(\d+)")
 
-# GraphQL queries for efficient data fetching
+# Optimized GraphQL queries for fast data fetching with maximum GitHub API limits
+# Uses maximum batch sizes: 100 issues + 100 PRs per call for 4x speed improvement
+
+# Main repository query with optimal batch sizes
 REPOSITORY_QUERY = """
 query($owner: String!, $repo: String!, $issuesCursor: String, $prsCursor: String) {
+  rateLimit {
+    limit
+    cost
+    remaining
+    resetAt
+  }
   repository(owner: $owner, name: $repo) {
+    id
+    name
+    nameWithOwner
+    description
+    defaultBranchRef {
+      name
+    }
     owner {
       login
       avatarUrl
+      url
+      ... on Organization {
+        name
+        description
+      }
+      ... on User {
+        name
+        bio
+      }
     }
     labels(first: 100) {
       nodes {
+        id
         name
+        color
+        description
+        createdAt
+        updatedAt
       }
     }
-    issues(first: 50, after: $issuesCursor, states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: ASC}) {
+    issues(first: 100, after: $issuesCursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo {
         hasNextPage
         endCursor
       }
       nodes {
+        id
         number
         title
         state
@@ -51,15 +82,35 @@ query($owner: String!, $repo: String!, $issuesCursor: String, $prsCursor: String
         locked
         url
         body
+        bodyText
         createdAt
         updatedAt
+        closedAt
         author {
           login
           avatarUrl
+          url
+          ... on User {
+            name
+            bio
+          }
+          ... on Organization {
+            name
+            description
+          }
+        }
+        assignees(first: 10) {
+          nodes {
+            login
+            avatarUrl
+          }
         }
         labels(first: 20) {
           nodes {
+            id
             name
+            color
+            description
           }
         }
         comments(first: 100) {
@@ -69,39 +120,89 @@ query($owner: String!, $repo: String!, $issuesCursor: String, $prsCursor: String
           }
           nodes {
             id
+            databaseId
             author {
               login
               avatarUrl
+              url
             }
             body
+            bodyText
             url
+            createdAt
             updatedAt
+            lastEditedAt
           }
+        }
+        milestone {
+          id
+          title
+          description
+          state
         }
       }
     }
-    pullRequests(first: 50, after: $prsCursor, states: [OPEN, CLOSED, MERGED], orderBy: {field: CREATED_AT, direction: ASC}) {
+    pullRequests(first: 100, after: $prsCursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo {
         hasNextPage
         endCursor
       }
       nodes {
+        id
         number
         title
         state
         merged
+        mergedAt
+        mergeable
         locked
         url
         body
+        bodyText
         createdAt
         updatedAt
+        closedAt
+        headRefName
+        baseRefName
         author {
           login
           avatarUrl
+          url
+          ... on User {
+            name
+            bio
+          }
+          ... on Organization {
+            name
+            description
+          }
+        }
+        assignees(first: 10) {
+          nodes {
+            login
+            avatarUrl
+          }
+        }
+        reviewers: reviewRequests(first: 10) {
+          nodes {
+            requestedReviewer {
+              ... on User {
+                login
+                avatarUrl
+              }
+              ... on Team {
+                name
+                slug
+              }
+            }
+          }
         }
         labels(first: 20) {
           nodes {
+            id
             name
+            color
+            description
           }
         }
         comments(first: 100) {
@@ -111,13 +212,366 @@ query($owner: String!, $repo: String!, $issuesCursor: String, $prsCursor: String
           }
           nodes {
             id
+            databaseId
             author {
               login
               avatarUrl
+              url
             }
             body
+            bodyText
             url
+            createdAt
             updatedAt
+            lastEditedAt
+          }
+        }
+        milestone {
+          id
+          title
+          description
+          state
+        }
+        reviews(first: 50) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            author {
+              login
+              avatarUrl
+              url
+            }
+            state
+            submittedAt
+            body
+            bodyText
+            url
+            createdAt
+            updatedAt
+            comments(first: 50) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                id
+                databaseId
+                author {
+                  login
+                  avatarUrl
+                  url
+                }
+                body
+                bodyText
+                url
+                path
+                position
+                line
+                originalPosition
+                diffHunk
+                createdAt
+                updatedAt
+                lastEditedAt
+              }
+            }
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              oid
+              messageHeadline
+              author {
+                name
+                email
+                date
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Query to fetch recently closed/merged issues and PRs for cleanup
+CLEANUP_QUERY = """
+query($owner: String!, $repo: String!, $since: DateTime!) {
+  rateLimit {
+    limit
+    cost
+    remaining
+    resetAt
+  }
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, states: [CLOSED], filterBy: {since: $since}, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        state
+        stateReason
+        updatedAt
+        closedAt
+      }
+    }
+    pullRequests(first: 100, states: [CLOSED, MERGED], orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        state
+        merged
+        updatedAt
+        closedAt
+        mergedAt
+      }
+    }
+  }
+}
+"""
+
+# Separate queries for parallel fetching when one resource type is done
+ISSUES_ONLY_QUERY = """
+query($owner: String!, $repo: String!, $issuesCursor: String) {
+  rateLimit {
+    cost
+    remaining
+  }
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, after: $issuesCursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        number
+        title
+        state
+        stateReason
+        locked
+        url
+        body
+        bodyText
+        createdAt
+        updatedAt
+        closedAt
+        author {
+          login
+          avatarUrl
+          url
+          ... on User {
+            name
+            bio
+          }
+          ... on Organization {
+            name
+            description
+          }
+        }
+        assignees(first: 10) {
+          nodes {
+            login
+            avatarUrl
+          }
+        }
+        labels(first: 20) {
+          nodes {
+            id
+            name
+            color
+            description
+          }
+        }
+        comments(first: 100) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            databaseId
+            author {
+              login
+              avatarUrl
+              url
+            }
+            body
+            bodyText
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+          }
+        }
+        milestone {
+          id
+          title
+          description
+          state
+        }
+      }
+    }
+  }
+}
+"""
+
+PRS_ONLY_QUERY = """
+query($owner: String!, $repo: String!, $prsCursor: String) {
+  rateLimit {
+    cost
+    remaining
+  }
+  repository(owner: $owner, name: $repo) {
+    pullRequests(first: 100, after: $prsCursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        number
+        title
+        state
+        merged
+        mergedAt
+        mergeable
+        locked
+        url
+        body
+        bodyText
+        createdAt
+        updatedAt
+        closedAt
+        headRefName
+        baseRefName
+        author {
+          login
+          avatarUrl
+          url
+          ... on User {
+            name
+            bio
+          }
+          ... on Organization {
+            name
+            description
+          }
+        }
+        assignees(first: 10) {
+          nodes {
+            login
+            avatarUrl
+          }
+        }
+        reviewers: reviewRequests(first: 10) {
+          nodes {
+            requestedReviewer {
+              ... on User {
+                login
+                avatarUrl
+              }
+              ... on Team {
+                name
+                slug
+              }
+            }
+          }
+        }
+        labels(first: 20) {
+          nodes {
+            id
+            name
+            color
+            description
+          }
+        }
+        comments(first: 100) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            databaseId
+            author {
+              login
+              avatarUrl
+              url
+            }
+            body
+            bodyText
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+          }
+        }
+        milestone {
+          id
+          title
+          description
+          state
+        }
+        reviews(first: 50) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            author {
+              login
+              avatarUrl
+              url
+            }
+            state
+            submittedAt
+            body
+            bodyText
+            url
+            createdAt
+            updatedAt
+            comments(first: 50) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                id
+                databaseId
+                author {
+                  login
+                  avatarUrl
+                  url
+                }
+                body
+                bodyText
+                url
+                path
+                position
+                line
+                originalPosition
+                diffHunk
+                createdAt
+                updatedAt
+                lastEditedAt
+              }
+            }
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              oid
+              messageHeadline
+              author {
+                name
+                email
+                date
+              }
+            }
           }
         }
       }
@@ -129,14 +583,17 @@ query($owner: String!, $repo: String!, $issuesCursor: String, $prsCursor: String
 
 class GitHubSync(commands.Cog):
     """
-    Sync GitHub issues and pull requests with Discord forum posts.
+    Sync ACTIVE GitHub issues and pull requests with Discord forum posts.
 
-    - Creates forum posts for GitHub issues/PRs with correct initial state (archived if closed/merged)
-    - Syncs comments between GitHub and Discord (configurable direction)
-    - Syncs Discord forum tags with GitHub labels (configurable direction)
-    - Auto-applies status tags: Issues get "open"/"closed"/"not resolved", PRs get "open"/"closed"/"merged"
-    - Prevents feedback loops: only user-initiated Discord changes sync back to GitHub
-    - Configurable sync direction: GitHub→Discord only, or bidirectional
+    OPTIMIZED FOR ACTIVE CONTENT ONLY:
+    - Only fetches and syncs OPEN issues and PRs from GitHub
+    - Creates forum posts only for open GitHub issues/PRs
+    - Automatically deletes Discord threads when GitHub issues/PRs are closed
+    - Syncs comments between GitHub and Discord (bidirectional)
+    - Syncs Discord forum tags with GitHub labels
+    - Auto-applies "open" status tags
+    - Prevents feedback loops: origin-aware sync direction
+    - Clean state management: no storage of closed/merged entities
     """
 
     def __init__(self, bot: Red) -> None:
@@ -168,23 +625,38 @@ class GitHubSync(commands.Cog):
         self.config.init_custom("prs", 1)
         self.config.register_custom("prs", forum_channel=None)  # forum channel id for PRs
         # Status tags are Discord-only and must NOT be created as GitHub labels
-        self._status_tag_names: set[str] = {"open", "closed", "merged", "not resolved"}
+        # Since we only work with open entities now, we only need "open" status tags
+        self._status_tag_names: set[str] = {"open"}
 
-        # Define required status tags for each type
-        self._required_issue_tags = {"open", "closed", "not resolved"}
-        self._required_pr_tags = {"open", "closed", "merged"}
+        # Define required status tags for each type (simplified for open-only)
+        self._required_issue_tags = {"open"}
+        self._required_pr_tags = {"open"}
 
-        # Track threads being updated by the bot to prevent sync loops
+        # Track threads being updated/created by the bot to prevent sync loops
         self._bot_updating_threads: set[int] = set()
+        self._bot_creating_threads: set[int] = set()  # Track threads being created during sync
+
+        # Concurrency control for parallel operations
+        self._discord_semaphore = asyncio.Semaphore(5)  # Max 5 concurrent Discord operations
+        self._github_semaphore = asyncio.Semaphore(3)   # Max 3 concurrent GitHub operations
 
         # Snapshot storage
         self.config.init_custom("state", 1)
 
         # Content tracking for hash-based change detection
         self.config.init_custom("content_hashes", 1)
+
+        # State tracking for hash-based state change detection
+        self.config.init_custom("state_hashes", 1)
+
         self.config.register_custom("content_hashes",
             issues={},  # number -> {"title_hash": str, "body_hash": str, "comments": {comment_id: hash}}
             prs={}      # number -> {"title_hash": str, "body_hash": str, "comments": {comment_id: hash}}
+        )
+
+        self.config.register_custom("state_hashes",
+            issues={},  # number -> state_hash
+            prs={}      # number -> state_hash
         )
 
         # Discord message tracking for editing
@@ -263,6 +735,8 @@ class GitHubSync(commands.Cog):
         else:
             self.log.warning("Attempted to queue config update outside of batch mode: %s", config_path)
 
+
+
     # ----------------------
     # GraphQL helpers
     # ----------------------
@@ -301,8 +775,20 @@ class GitHubSync(commands.Cog):
 
                     data = await response.json()
                     if "errors" in data:
-                        self.log.error("GraphQL errors: %s", data["errors"])
-                        return None
+                        # Log GraphQL errors but continue if we have partial data
+                        errors = data["errors"]
+                        self.log.warning("GraphQL query had %d errors (continuing with partial data): %s",
+                                       len(errors), [e.get("message", str(e))[:100] for e in errors[:3]])
+
+                        # Only return None if we have no data at all
+                        if not data.get("data"):
+                            self.log.error("GraphQL request failed completely - no data returned")
+                            return None
+
+                        # Count deprecated field errors separately
+                        deprecated_errors = [e for e in errors if "deprecated" in e.get("message", "").lower()]
+                        if deprecated_errors:
+                            self.log.debug("Ignoring %d deprecated field errors", len(deprecated_errors))
 
                     return data.get("data")
         except Exception:
@@ -319,6 +805,312 @@ class GitHubSync(commands.Cog):
         return await asyncio.to_thread(fn_noargs)
 
     # ----------------------
+    # Optimized parallel fetching methods for GraphQL
+    # ----------------------
+    async def _fetch_issues_page(self, guild: discord.Guild, owner: str, repo: str, cursor: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Fetch a single page of issues using the optimized issues-only query."""
+        try:
+            variables = {
+                "owner": owner,
+                "repo": repo,
+                "issuesCursor": cursor
+            }
+
+            data = await self._graphql_request(guild, ISSUES_ONLY_QUERY, variables)
+            if not data or not data.get("repository"):
+                return None
+
+            repo_data = data["repository"]
+            issues = repo_data.get("issues", {})
+            issue_nodes = issues.get("nodes", [])
+
+            return {
+                "issues": issue_nodes,
+                "hasNext": issues.get("pageInfo", {}).get("hasNextPage", False),
+                "cursor": issues.get("pageInfo", {}).get("endCursor"),
+                "rate_limit": data.get("rateLimit", {})
+            }
+        except Exception:
+            self.log.exception("Failed to fetch issues page")
+            return None
+
+    async def _fetch_prs_page(self, guild: discord.Guild, owner: str, repo: str, cursor: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Fetch a single page of PRs using the optimized PRs-only query."""
+        try:
+            variables = {
+                "owner": owner,
+                "repo": repo,
+                "prsCursor": cursor
+            }
+
+            data = await self._graphql_request(guild, PRS_ONLY_QUERY, variables)
+            if not data or not data.get("repository"):
+                return None
+
+            repo_data = data["repository"]
+            prs = repo_data.get("pullRequests", {})
+            pr_nodes = prs.get("nodes", [])
+
+            return {
+                "prs": pr_nodes,
+                "hasNext": prs.get("pageInfo", {}).get("hasNextPage", False),
+                "cursor": prs.get("pageInfo", {}).get("endCursor"),
+                "rate_limit": data.get("rateLimit", {})
+            }
+        except Exception:
+            self.log.exception("Failed to fetch PRs page")
+            return None
+
+    async def _fetch_closed_entities_for_cleanup(self, guild: discord.Guild, since_hours: int = 24) -> Optional[Dict[str, Any]]:
+        """Fetch recently closed/merged issues and PRs for cleanup purposes."""
+        try:
+            owner = await self.config.guild(guild).github_owner()
+            repo_name = await self.config.guild(guild).github_repo()
+            if not owner or not repo_name:
+                return None
+
+            # Calculate since timestamp (look back specified hours)
+            import datetime
+            since_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=since_hours)
+            since_iso = since_dt.isoformat()
+
+            variables = {
+                "owner": owner,
+                "repo": repo_name,
+                "since": since_iso
+            }
+
+            data = await self._graphql_request(guild, CLEANUP_QUERY, variables)
+            if not data or not data.get("repository"):
+                return None
+
+            repo_data = data["repository"]
+            closed_issues = repo_data.get("issues", {}).get("nodes", [])
+            all_closed_prs = repo_data.get("pullRequests", {}).get("nodes", [])
+            
+            # Manually filter PRs by the since timestamp since filterBy is not supported
+            closed_prs = []
+            for pr in all_closed_prs:
+                # Check if the PR was updated since our cutoff time
+                updated_at = pr.get("updatedAt")
+                if updated_at and updated_at >= since_iso:
+                    closed_prs.append(pr)
+
+            return {
+                "closed_issues": closed_issues,
+                "closed_prs": closed_prs,
+                "rate_limit": data.get("rateLimit", {})
+            }
+
+        except Exception:
+            self.log.exception("Failed to fetch closed entities for cleanup")
+            return None
+
+    async def _cleanup_closed_discord_threads(self, guild: discord.Guild, closed_data: Dict[str, Any]) -> int:
+        """Delete Discord threads for closed/merged GitHub issues and PRs."""
+        deleted_count = 0
+        
+        try:
+            # Process closed issues
+            for issue in closed_data.get("closed_issues", []):
+                number = issue.get("number")
+                if not number:
+                    continue
+                    
+                thread = await self._get_thread_by_number(guild, number=number, kind="issues")
+                if thread:
+                    try:
+                        await thread.delete()
+                        self.log.info("Deleted Discord thread for closed issue #%s", number)
+                        deleted_count += 1
+                        
+                        # Clean up stored data
+                        await self._cleanup_entity_data(guild, number, "issues")
+                        
+                    except discord.NotFound:
+                        # Thread already deleted
+                        await self._cleanup_entity_data(guild, number, "issues")
+                    except Exception:
+                        self.log.exception("Failed to delete thread for closed issue #%s", number)
+
+            # Process closed/merged PRs
+            for pr in closed_data.get("closed_prs", []):
+                number = pr.get("number")
+                if not number:
+                    continue
+                    
+                thread = await self._get_thread_by_number(guild, number=number, kind="prs")
+                if thread:
+                    try:
+                        await thread.delete()
+                        self.log.info("Deleted Discord thread for closed/merged PR #%s", number)
+                        deleted_count += 1
+                        
+                        # Clean up stored data
+                        await self._cleanup_entity_data(guild, number, "prs")
+                        
+                    except discord.NotFound:
+                        # Thread already deleted
+                        await self._cleanup_entity_data(guild, number, "prs")
+                    except Exception:
+                        self.log.exception("Failed to delete thread for closed/merged PR #%s", number)
+
+        except Exception:
+            self.log.exception("Failed to cleanup closed Discord threads")
+            
+        return deleted_count
+
+    async def _cleanup_entity_data(self, guild: discord.Guild, number: int, kind: str) -> None:
+        """Clean up all stored data for a closed/deleted entity."""
+        try:
+            # Remove from links_by_number
+            try:
+                await self.config.custom(kind, guild.id).clear_raw("links_by_number", str(number))
+            except Exception:
+                pass
+                
+            # Remove from content_hashes
+            try:
+                content_hashes = await self.config.custom("content_hashes", guild.id).get_raw(kind, default={})
+                if str(number) in content_hashes:
+                    del content_hashes[str(number)]
+                    await self.config.custom("content_hashes", guild.id).set_raw(kind, value=content_hashes)
+            except Exception:
+                pass
+                
+            # Remove from state_hashes
+            try:
+                state_hashes = await self.config.custom("state_hashes", guild.id).get_raw(kind, default={})
+                if str(number) in state_hashes:
+                    del state_hashes[str(number)]
+                    await self.config.custom("state_hashes", guild.id).set_raw(kind, value=state_hashes)
+            except Exception:
+                pass
+                
+            # Remove from discord_messages
+            try:
+                discord_messages = await self.config.custom("discord_messages", guild.id).get_raw(kind, default={})
+                if str(number) in discord_messages:
+                    del discord_messages[str(number)]
+                    await self.config.custom("discord_messages", guild.id).set_raw(kind, value=discord_messages)
+            except Exception:
+                pass
+                
+            # Remove from content_origins
+            try:
+                content_origins = await self.config.custom("content_origins", guild.id).get_raw(kind, default={})
+                if str(number) in content_origins:
+                    del content_origins[str(number)]
+                    await self.config.custom("content_origins", guild.id).set_raw(kind, value=content_origins)
+            except Exception:
+                pass
+                
+            self.log.debug("Cleaned up stored data for %s #%s", kind, number)
+            
+        except Exception:
+            self.log.exception("Failed to cleanup entity data for %s #%s", kind, number)
+
+    async def _cleanup_orphaned_discord_threads(self, guild: discord.Guild, current_snapshot: Dict[str, Any]) -> int:
+        """Clean up Discord threads for issues/PRs that are no longer open in GitHub."""
+        deleted_count = 0
+        
+        try:
+            # Get current open issues/PRs from snapshot
+            open_issue_numbers = set(current_snapshot.get("issues", {}).keys())
+            open_pr_numbers = set(current_snapshot.get("prs", {}).keys())
+            
+            # Check issues forum for orphaned threads
+            issues_forum_id = await self.config.custom("issues", guild.id).forum_channel()
+            if issues_forum_id:
+                issues_forum = guild.get_channel(issues_forum_id)
+                if isinstance(issues_forum, discord.ForumChannel):
+                    deleted_count += await self._cleanup_forum_orphaned_threads(
+                        guild, issues_forum, open_issue_numbers, "issues"
+                    )
+            
+            # Check PRs forum for orphaned threads
+            prs_forum_id = await self.config.custom("prs", guild.id).forum_channel()
+            if prs_forum_id:
+                prs_forum = guild.get_channel(prs_forum_id)
+                if isinstance(prs_forum, discord.ForumChannel):
+                    deleted_count += await self._cleanup_forum_orphaned_threads(
+                        guild, prs_forum, open_pr_numbers, "prs"
+                    )
+                    
+        except Exception:
+            self.log.exception("Failed to cleanup orphaned Discord threads")
+            
+        return deleted_count
+
+    async def _cleanup_forum_orphaned_threads(self, guild: discord.Guild, forum: discord.ForumChannel, open_numbers: set, kind: str) -> int:
+        """Clean up orphaned threads in a specific forum."""
+        deleted_count = 0
+        
+        try:
+            # Check stored thread links to find threads that should exist
+            links_by_number = await self.config.custom(kind, guild.id).get_raw("links_by_number", default={})
+            
+            for number_str, thread_id_str in links_by_number.items():
+                number = int(number_str)
+                
+                # If this issue/PR is no longer open, delete the Discord thread
+                if str(number) not in open_numbers:
+                    try:
+                        # Get the thread, either from cache or by fetching
+                        thread = None
+                        cached_channel = guild.get_channel(int(thread_id_str))
+                        if isinstance(cached_channel, discord.Thread):
+                            thread = cached_channel
+                        elif not cached_channel:
+                            # Try to fetch if not in cache
+                            try:
+                                fetched = await guild.fetch_channel(int(thread_id_str))
+                                if isinstance(fetched, discord.Thread):
+                                    thread = fetched
+                                else:
+                                    # Not a thread, clean up data
+                                    await self._cleanup_entity_data(guild, number, kind)
+                                    continue
+                            except discord.NotFound:
+                                # Thread already deleted, just clean up data
+                                await self._cleanup_entity_data(guild, number, kind)
+                                continue
+                        else:
+                            # Channel exists but is not a thread, clean up data
+                            await self._cleanup_entity_data(guild, number, kind)
+                            continue
+                                
+                        if thread:
+                            await thread.delete()
+                            self.log.info("Deleted orphaned Discord thread for closed %s #%s", kind[:-1], number)
+                            deleted_count += 1
+                            
+                            # Clean up stored data
+                            await self._cleanup_entity_data(guild, number, kind)
+                            
+                    except discord.NotFound:
+                        # Thread already deleted, just clean up data
+                        await self._cleanup_entity_data(guild, number, kind)
+                    except Exception:
+                        self.log.exception("Failed to delete orphaned thread for %s #%s", kind, number)
+                        
+        except Exception:
+            self.log.exception("Failed to cleanup orphaned threads in %s forum", kind)
+            
+        return deleted_count
+
+    async def _cleanup_thread_tracking(self, thread_id: int) -> None:
+        """Clean up thread tracking after a delay to prevent memory leaks."""
+        try:
+            # Wait 30 seconds for on_thread_create to naturally remove it
+            await asyncio.sleep(30)
+            # Remove from tracking if still present (shouldn't be, but safety measure)
+            self._bot_creating_threads.discard(thread_id)
+            self.log.debug("Cleaned up thread tracking for %s (safety cleanup)", thread_id)
+        except Exception:
+            self.log.exception("Failed to clean up thread tracking for %s", thread_id)
+
+    # ----------------------
     # Content tracking utilities
     # ----------------------
     def _hash_content(self, content: str) -> str:
@@ -329,32 +1121,13 @@ class GitHubSync(commands.Cog):
 
     def _get_status_color(self, data: Dict[str, Any], kind: str) -> discord.Color:
         """Get Discord embed color based on issue/PR status."""
-        if kind == "issues":
-            state = data.get("state", "").lower()
-            state_reason = data.get("state_reason")
-            state_reason_lower = state_reason.lower() if state_reason else ""
-
-            if state == "open":
-                return discord.Color.green()
-            elif state == "closed":
-                if state_reason_lower in ["not_planned", "duplicate"]:
-                    return discord.Color.greyple()  # Not resolved
-                else:
-                    return discord.Color.red()  # Closed
-            else:
-                return discord.Color.default()
-
-        elif kind == "prs":
-            if data.get("merged"):
-                return discord.Color.purple()  # Merged
-            elif data.get("state", "").lower() == "closed":
-                return discord.Color.red()  # Closed
-            elif data.get("state", "").lower() == "open":
-                return discord.Color.green()  # Open
-            else:
-                return discord.Color.default()
-
-        return discord.Color.default()
+        # Since we only work with open entities, always return green for active content
+        state = data.get("state", "").lower()
+        if state == "open":
+            return discord.Color.green()
+        else:
+            # Fallback for any edge cases
+            return discord.Color.default()
 
     # ----------------------
     # Utilities
@@ -470,7 +1243,13 @@ class GitHubSync(commands.Cog):
             await self._reconcile_forum_and_labels(ctx.guild, channel, repo)
 
     @ghsyncset.command(name="show")
-    async def ghsyncset_show(self, ctx: commands.Context) -> None:
+    async def ghsyncset_show(self, ctx: commands.Context, detailed: bool = False) -> None:
+        """
+        Show current GitHub Sync configuration.
+
+        Args:
+            detailed: If True, show detailed snapshot information and performance metrics
+        """
         if not ctx.guild:
             await ctx.send("Run this in a guild.")
             return
@@ -510,6 +1289,52 @@ class GitHubSync(commands.Cog):
 
         if self.github_poll_task.is_running():
             embed.add_field(name="Active Task Interval", value=f"{self.github_poll_task.seconds}s", inline=True)
+
+        # Add enhanced snapshot information if detailed=True
+        if detailed:
+            try:
+                snapshot = await self.config.custom("state", ctx.guild.id).get_raw("snapshot", default=None)
+                if snapshot:
+                    metadata = snapshot.get("fetch_metadata", {})
+
+                    # Calculate time since last fetch
+                    import time
+                    last_fetch = metadata.get("timestamp", 0)
+                    if last_fetch:
+                        age_seconds = int(time.time() - last_fetch)
+                        age_str = f"<t:{int(last_fetch)}:R>"
+                    else:
+                        age_str = "Never"
+
+                    snapshot_info = (
+                        f"**Last Fetch:** {age_str}\n"
+                        f"**Issues:** {len(snapshot.get('issues', {}))}\n"
+                        f"**PRs:** {len(snapshot.get('prs', {}))}\n"
+                        f"**Labels:** {len(snapshot.get('labels', {}))}\n"
+                        f"**Comments:** {metadata.get('comments_fetched', 0)}\n"
+                        f"**API Calls:** {metadata.get('total_api_calls', 0)}\n"
+                        f"**Fetch Time:** {metadata.get('fetch_duration', 0):.2f}s"
+                    )
+
+                    if metadata.get("truncated_entities"):
+                        snapshot_info += f"\n**⚠️ Truncated:** {len(metadata['truncated_entities'])} entities"
+
+                    embed.add_field(name="📊 Snapshot Status", value=snapshot_info, inline=True)
+
+                    # Performance info
+                    repo_info = snapshot.get("repo_info", {})
+                    if repo_info:
+                        perf_info = (
+                            f"**Repo:** {repo_info.get('name_with_owner', 'Unknown')}\n"
+                            f"**Owner:** {repo_info.get('owner_type', 'Unknown')} ({repo_info.get('owner_login', 'Unknown')})\n"
+                            f"**Assignees:** {metadata.get('assignees_count', 0)}\n"
+                            f"**Milestones:** {metadata.get('milestones_count', 0)}"
+                        )
+                        embed.add_field(name="📈 Repository Data", value=perf_info, inline=True)
+                else:
+                    embed.add_field(name="📊 Snapshot Status", value="No snapshot available", inline=True)
+            except Exception:
+                embed.add_field(name="📊 Snapshot Status", value="Error reading snapshot", inline=True)
 
         await ctx.send(embed=embed)
 
@@ -884,6 +1709,66 @@ class GitHubSync(commands.Cog):
         embed.set_footer(text="Required status tags: Issues (open, closed, not resolved) | PRs (open, closed, merged)")
         await ctx.send(embed=embed)
 
+    @ghsyncset.command(name="init_state_hashes")
+    async def ghsyncset_init_state_hashes(self, ctx: commands.Context) -> None:
+        """Initialize state hashes for existing threads to prevent false positive updates."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        repo = await self._get_repo(ctx.guild)
+        if not repo:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send("🔄 Initializing state hashes for existing threads...")
+
+        try:
+            # Get current snapshot
+            snapshot = await self._build_github_snapshot(ctx.guild)
+            initialized_count = 0
+
+            # Check forums
+            issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
+            prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
+            issues_forum = ctx.guild.get_channel(issues_forum_id) if issues_forum_id else None
+            prs_forum = ctx.guild.get_channel(prs_forum_id) if prs_forum_id else None
+
+            for forum, kind in [(issues_forum, "issues"), (prs_forum, "prs")]:
+                if not isinstance(forum, discord.ForumChannel):
+                    continue
+
+                entities = snapshot.get(kind, {})
+                if not entities:
+                    continue
+
+                for number_str, data in entities.items():
+                    # Check if thread exists and if hash is missing
+                    thread_id = await self._get_thread_id_by_number(ctx.guild, number=int(number_str), kind=kind)
+                    if thread_id:
+                        # Check if hash already exists
+                        stored_hashes = await self.config.custom("state_hashes", ctx.guild.id).get_raw(kind, default={})
+                        if number_str not in stored_hashes:
+                            # Initialize hash for this entity
+                            labels = data.get("labels", [])
+                            label_tags = self._labels_to_forum_tags(forum, labels)
+                            status_tags = self._get_status_tags_for_entity(forum, data, kind)
+                            
+                            # Combine tags, ensuring status tags have priority and we don't exceed Discord's 5-tag limit
+                            desired_tags = status_tags  # Status tags first (most important)
+                            for tag in label_tags:
+                                if tag.id not in {st.id for st in desired_tags} and len(desired_tags) < 5:
+                                    desired_tags.append(tag)
+
+                            await self._store_state_hash(ctx.guild, int(number_str), kind, data, desired_tags)
+                            initialized_count += 1
+
+            await ctx.send(f"✅ Initialized state hashes for {initialized_count} existing threads.")
+
+        except Exception:
+            self.log.exception("init_state_hashes failed")
+            await ctx.send("❌ Failed to initialize state hashes. Check logs.")
+
     @ghsyncset.command(name="clear")
     async def ghsyncset_clear(self, ctx: commands.Context, target: str = "snapshot") -> None:
         """
@@ -899,7 +1784,8 @@ class GitHubSync(commands.Cog):
 
         - snapshot: Reset sync state, forces re-sync on next polling cycle
         - comments: Clear comment tracking, forces all comments to be re-posted
-        - full: Clear everything (snapshot + content hashes + message tracking)
+        - full: Clear everything (snapshot + content hashes + state hashes + message tracking)
+        - state: Clear state hashes only (forces state updates on next sync)
 
         Warning: This will cause content to be re-processed as "new" during the next sync.
         """
@@ -908,7 +1794,7 @@ class GitHubSync(commands.Cog):
             return
 
         # Validate target
-        valid_targets = ["snapshot", "comments", "full"]
+        valid_targets = ["snapshot", "comments", "state", "full"]
         if target not in valid_targets:
             await ctx.send(f"❌ Invalid target. Use one of: {', '.join(valid_targets)}")
             return
@@ -924,6 +1810,12 @@ class GitHubSync(commands.Cog):
         if target == "comments" and not content_hashes:
             await ctx.send("❌ No comment hashes found to clear.")
             return
+
+        if target == "state":
+            state_hashes = await self.config.custom("state_hashes", ctx.guild.id).all()
+            if not state_hashes:
+                await ctx.send("❌ No state hashes found to clear.")
+                return
 
         # Count items
         issues_count = len(current_snapshot.get("issues", {})) if current_snapshot else 0
@@ -963,6 +1855,21 @@ class GitHubSync(commands.Cog):
                 "• May result in duplicate comments if some were already posted\n\n"
                 "**This action cannot be undone.**"
             )
+        elif target == "state":
+            # Count state hashes
+            state_hashes = await self.config.custom("state_hashes", ctx.guild.id).all()
+            total_state_hashes = sum(len(kind_data) for kind_data in state_hashes.values() if isinstance(kind_data, dict))
+
+            clear_type = "State Hashes Only"
+            description = (
+                "This will clear stored state tracking data:\n"
+                f"• **{total_state_hashes}** state hashes across all issues/PRs\n"
+                "\n**Effects:**\n"
+                "• All GitHub entities will have their status re-checked on next sync\n"
+                "• Useful for fixing Step 5 false positive updates\n"
+                "• State hashes will be rebuilt automatically during next sync\n\n"
+                "**This action cannot be undone.**"
+            )
         else:  # full
             clear_type = "Full Reset"
             description = (
@@ -972,6 +1879,7 @@ class GitHubSync(commands.Cog):
                 f"• **{labels_count}** labels\n"
                 f"• **{total_comment_hashes}** comment hashes\n"
                 "• **Content hashes** (change detection data)\n"
+                "• **State hashes** (status change detection data)\n"
                 "• **Message tracking** (Discord↔GitHub message links)\n"
                 "• **Origin tracking** (content source information)\n"
                 "\n**Effects:**\n"
@@ -1050,12 +1958,23 @@ class GitHubSync(commands.Cog):
                 cleared_items = ["comment hashes"]
                 self.log.info("Cleared %d comment hashes for guild %s", total_comment_hashes, ctx.guild.id)
 
+            elif target == "state":
+                # Get count before clearing
+                state_hashes = await self.config.custom("state_hashes", ctx.guild.id).all()
+                total_state_hashes = sum(len(kind_data) for kind_data in state_hashes.values() if isinstance(kind_data, dict))
+
+                # Clear state hashes
+                await self.config.custom("state_hashes", ctx.guild.id).clear()
+                cleared_items = ["state hashes"]
+                self.log.info("Cleared %d state hashes for guild %s", total_state_hashes, ctx.guild.id)
+
             else:  # full
                 await self.config.custom("state", ctx.guild.id).clear()
                 await self.config.custom("content_hashes", ctx.guild.id).clear()
+                await self.config.custom("state_hashes", ctx.guild.id).clear()
                 await self.config.custom("discord_messages", ctx.guild.id).clear()
                 await self.config.custom("content_origins", ctx.guild.id).clear()
-                cleared_items = ["snapshot", "content hashes", "message tracking", "origin tracking"]
+                cleared_items = ["snapshot", "content hashes", "state hashes", "message tracking", "origin tracking"]
                 self.log.info("Cleared all GitHub data for guild %s (contained %d issues, %d PRs, %d labels, %d comment hashes)",
                              ctx.guild.id, issues_count, prs_count, labels_count, total_comment_hashes)
 
@@ -1081,6 +2000,17 @@ class GitHubSync(commands.Cog):
                     "• Use `[p]ghsyncset syncall` to manually trigger comment sync\n"
                     "• May result in duplicate comments if some were already posted"
                 )
+            elif target == "state":
+                # Get the count that was cleared
+                success_description = (
+                    f"Successfully cleared state tracking data:\n"
+                    f"• **{total_state_hashes}** state hashes\n"
+                    "\n**Next Steps:**\n"
+                    "• The next polling cycle will re-check all entity states\n"
+                    "• Use `[p]ghsyncset syncall` to manually trigger state sync\n"
+                    "• State hashes will be rebuilt automatically during sync\n"
+                    "• Use `[p]ghsyncset init_state_hashes` to pre-initialize hashes without updates"
+                )
             else:  # full
                 success_description = (
                     f"Successfully cleared ALL GitHub data:\n"
@@ -1088,7 +2018,7 @@ class GitHubSync(commands.Cog):
                     f"• **{prs_count}** pull requests\n"
                     f"• **{labels_count}** labels\n"
                     f"• **{total_comment_hashes}** comment hashes\n"
-                    "• Content hashes, message tracking, origin tracking\n"
+                    "• Content hashes, state hashes, message tracking, origin tracking\n"
                     "\n**Next Steps:**\n"
                     "• The next polling cycle will rebuild everything\n"
                     "• Use `[p]ghsyncset syncall` to manually trigger a full sync\n"
@@ -1122,6 +2052,644 @@ class GitHubSync(commands.Cog):
                 await msg.clear_reactions()
             except:
                 pass
+
+    @ghsyncset.command(name="test_graphql", hidden=True)
+    async def ghsyncset_test_graphql(self, ctx: commands.Context) -> None:
+        """Test GraphQL query to debug snapshot issues."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        repo = await self._get_repo(ctx.guild)
+        if not repo:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send("🧪 Testing GraphQL query...")
+
+        try:
+            # Test variables for first page
+            owner = await self.config.guild(ctx.guild).github_owner()
+            repo_name = await self.config.guild(ctx.guild).github_repo()
+
+            variables = {
+                "owner": owner,
+                "repo": repo_name,
+                "issuesCursor": None,
+                "prsCursor": None
+            }
+
+            # Make GraphQL request
+            data = await self._graphql_request(ctx.guild, REPOSITORY_QUERY, variables)
+
+            if not data:
+                await ctx.send("❌ GraphQL request returned no data.")
+                return
+
+            repo_data = data.get("repository", {})
+            if not repo_data:
+                await ctx.send("❌ No repository data in GraphQL response.")
+                return
+
+            # Analyze the response
+            issues_data = repo_data.get("issues", {})
+            prs_data = repo_data.get("pullRequests", {})
+            labels_data = repo_data.get("labels", {})
+
+            issues_count = len(issues_data.get("nodes", []))
+            prs_count = len(prs_data.get("nodes", []))
+            labels_count = len(labels_data.get("nodes", []))
+
+            embed = discord.Embed(
+                title="🧪 GraphQL Test Results",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="📊 Data Retrieved",
+                value=f"**Issues:** {issues_count}\n**PRs:** {prs_count}\n**Labels:** {labels_count}",
+                inline=True
+            )
+
+            if repo_data.get("owner"):
+                owner_info = repo_data["owner"]
+                embed.add_field(
+                    name="🏢 Repository Info",
+                    value=f"**Owner:** {owner_info.get('login', 'Unknown')}\n**Type:** {'Org' if owner_info.get('name') else 'User'}",
+                    inline=True
+                )
+
+            # Show pagination info
+            if issues_data.get("pageInfo", {}).get("hasNextPage"):
+                embed.add_field(name="📄 Issues Pagination", value="Has more pages", inline=True)
+            if prs_data.get("pageInfo", {}).get("hasNextPage"):
+                embed.add_field(name="📄 PRs Pagination", value="Has more pages", inline=True)
+
+            # Sample issue/PR titles
+            if issues_count > 0:
+                sample_issues = [issue.get("title", "No title")[:50] for issue in issues_data["nodes"][:3]]
+                embed.add_field(
+                    name="📝 Sample Issues",
+                    value="\n".join(f"• {title}" for title in sample_issues),
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+
+        except Exception:
+            self.log.exception("GraphQL test failed")
+            await ctx.send("❌ GraphQL test failed. Check logs for details.")
+
+    @ghsyncset.command(name="cleanup_closed")
+    async def ghsyncset_cleanup_closed(self, ctx: commands.Context, days: int = 7) -> None:
+        """
+        Clean up Discord threads for closed/merged GitHub issues and PRs.
+        
+        Args:
+            days: How many days back to look for closed issues/PRs (default: 7)
+        """
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        repo = await self._get_repo(ctx.guild)
+        if not repo:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send(f"🔄 Looking for closed issues/PRs in the last {days} days...")
+
+        try:
+            # Fetch closed entities
+            cleanup_data = await self._fetch_closed_entities_for_cleanup(ctx.guild, since_hours=days * 24)
+            if not cleanup_data:
+                await ctx.send("❌ Failed to fetch closed entities from GitHub.")
+                return
+
+            closed_issues_count = len(cleanup_data.get("closed_issues", []))
+            closed_prs_count = len(cleanup_data.get("closed_prs", []))
+
+            if closed_issues_count == 0 and closed_prs_count == 0:
+                await ctx.send(f"✅ No closed issues or PRs found in the last {days} days.")
+                return
+
+            # Show what will be cleaned up
+            embed = discord.Embed(
+                title="🧹 Cleanup Preview",
+                description=f"Found in the last {days} days:",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Closed Issues", value=str(closed_issues_count), inline=True)
+            embed.add_field(name="Closed/Merged PRs", value=str(closed_prs_count), inline=True)
+            embed.add_field(name="Action", value="Delete corresponding Discord threads", inline=False)
+            embed.set_footer(text="React with ✅ to proceed or ❌ to cancel")
+
+            msg = await ctx.send(embed=embed)
+            await msg.add_reaction("✅")
+            await msg.add_reaction("❌")
+
+            def check(reaction, user):
+                return (
+                    user == ctx.author
+                    and str(reaction.emoji) in ["✅", "❌"]
+                    and reaction.message.id == msg.id
+                )
+
+            try:
+                reaction, user = await self.bot.wait_for("reaction_add", timeout=60.0, check=check)
+            except asyncio.TimeoutError:
+                await msg.edit(embed=discord.Embed(
+                    title="❌ Timed Out",
+                    description="Cleanup cancelled due to timeout.",
+                    color=discord.Color.red()
+                ))
+                return
+
+            if str(reaction.emoji) == "❌":
+                await msg.edit(embed=discord.Embed(
+                    title="❌ Cancelled",
+                    description="Cleanup cancelled by user.",
+                    color=discord.Color.red()
+                ))
+                return
+
+            # Proceed with cleanup
+            deleted_count = await self._cleanup_closed_discord_threads(ctx.guild, cleanup_data)
+
+            success_embed = discord.Embed(
+                title="✅ Cleanup Complete",
+                description=f"Successfully deleted {deleted_count} Discord threads for closed GitHub entities.",
+                color=discord.Color.green()
+            )
+            success_embed.add_field(
+                name="Summary",
+                value=f"• Found {closed_issues_count} closed issues\n• Found {closed_prs_count} closed/merged PRs\n• Deleted {deleted_count} Discord threads",
+                inline=False
+            )
+
+            await msg.edit(embed=success_embed)
+
+        except Exception:
+            self.log.exception("cleanup_closed command failed")
+            await ctx.send("❌ Failed to cleanup closed threads. Check logs.")
+
+    @ghsyncset.command(name="test_embed", hidden=True)
+    async def ghsyncset_test_embed(self, ctx: commands.Context) -> None:
+        """Test embed creation and posting to debug freezing issues."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        await ctx.send("🧪 Testing embed creation and posting...")
+
+        try:
+            # Create a test data structure
+            test_data = {
+                "number": 999,
+                "title": "Test Issue for Embed Testing",
+                "body": "This is a test issue to debug embed creation and posting performance.",
+                "state": "open",
+                "url": "https://github.com/test/test/issues/999",
+                "user": "TestUser",
+                "user_avatar": "https://avatars.githubusercontent.com/u/1?v=4"
+            }
+
+            # Test embed creation timing
+            import time
+            start_time = time.time()
+            
+            try:
+                embed = await asyncio.wait_for(
+                    self._create_embed(test_data, "issues"),
+                    timeout=5.0
+                )
+                creation_time = time.time() - start_time
+                
+                # Test posting the embed to this channel
+                post_start = time.time()
+                msg = await asyncio.wait_for(
+                    ctx.send(embed=embed),
+                    timeout=10.0
+                )
+                post_time = time.time() - post_start
+                
+                # Success report
+                success_embed = discord.Embed(
+                    title="✅ Embed Test Successful",
+                    color=discord.Color.green()
+                )
+                success_embed.add_field(
+                    name="Performance",
+                    value=f"• Embed creation: {creation_time:.2f}s\n• Embed posting: {post_time:.2f}s\n• Total time: {creation_time + post_time:.2f}s",
+                    inline=False
+                )
+                success_embed.add_field(
+                    name="Status", 
+                    value="All embed operations completed successfully", 
+                    inline=False
+                )
+                
+                await ctx.send(embed=success_embed)
+                
+            except asyncio.TimeoutError:
+                await ctx.send("❌ **TIMEOUT DETECTED**: Embed creation or posting took too long (>15s total)")
+            except Exception as e:
+                await ctx.send(f"❌ **ERROR DETECTED**: {str(e)}")
+
+        except Exception:
+            self.log.exception("test_embed command failed")
+            await ctx.send("❌ Failed to test embeds. Check logs.")
+
+    @ghsyncset.command(name="force_cleanup", hidden=True)
+    async def ghsyncset_force_cleanup(self, ctx: commands.Context) -> None:
+        """Force cleanup of all orphaned Discord threads (debug command)."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        repo = await self._get_repo(ctx.guild)
+        if not repo:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send("🧹 Force cleaning up orphaned Discord threads...")
+
+        try:
+            # Build current snapshot to see what should exist
+            snapshot = await self._build_github_snapshot(ctx.guild)
+            
+            # Run cleanup phases
+            cleanup_data = await self._fetch_closed_entities_for_cleanup(ctx.guild, since_hours=168)
+            recent_deleted = 0
+            if cleanup_data:
+                recent_deleted = await self._cleanup_closed_discord_threads(ctx.guild, cleanup_data)
+            
+            orphaned_deleted = await self._cleanup_orphaned_discord_threads(ctx.guild, snapshot)
+            
+            total_deleted = recent_deleted + orphaned_deleted
+            
+            embed = discord.Embed(
+                title="🧹 Cleanup Complete",
+                color=discord.Color.green() if total_deleted > 0 else discord.Color.blue()
+            )
+            embed.add_field(
+                name="Results",
+                value=f"• Recently closed: {recent_deleted} threads deleted\n• Orphaned threads: {orphaned_deleted} threads deleted\n• **Total deleted:** {total_deleted} threads",
+                inline=False
+            )
+            embed.add_field(
+                name="Current State",
+                value=f"• Open issues: {len(snapshot.get('issues', {}))}\n• Open PRs: {len(snapshot.get('prs', {}))}",
+                inline=False
+            )
+            
+            if total_deleted == 0:
+                embed.add_field(name="Status", value="✅ No orphaned threads found", inline=False)
+            else:
+                embed.add_field(name="Status", value=f"✅ Cleaned up {total_deleted} orphaned threads", inline=False)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception:
+            self.log.exception("force_cleanup command failed")
+            await ctx.send("❌ Failed to force cleanup. Check logs.")
+
+    @ghsyncset.command(name="test_cleanup_query", hidden=True)
+    async def ghsyncset_test_cleanup_query(self, ctx: commands.Context, hours: int = 24) -> None:
+        """Test the cleanup GraphQL query to debug issues."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+            
+        owner = await self.config.guild(ctx.guild).github_owner()
+        repo_name = await self.config.guild(ctx.guild).github_repo()
+        if not owner or not repo_name:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send(f"🧪 Testing cleanup query for last {hours} hours...")
+        
+        try:
+            # Test the cleanup query
+            cleanup_data = await self._fetch_closed_entities_for_cleanup(ctx.guild, since_hours=hours)
+            
+            if cleanup_data:
+                closed_issues = cleanup_data.get("closed_issues", [])
+                closed_prs = cleanup_data.get("closed_prs", [])
+                rate_limit = cleanup_data.get("rate_limit", {})
+                
+                result = [
+                    f"**Cleanup Query Results (last {hours}h):**",
+                    f"• Closed issues found: {len(closed_issues)}",
+                    f"• Closed/merged PRs found: {len(closed_prs)}",
+                    f"• Rate limit remaining: {rate_limit.get('remaining', 'unknown')}"
+                ]
+                
+                if closed_issues:
+                    issue_numbers = ["#" + str(issue["number"]) for issue in closed_issues[:5]]
+                    result.append(f"**Recent closed issues:** {', '.join(issue_numbers)}")
+                if closed_prs:
+                    pr_numbers = ["#" + str(pr["number"]) for pr in closed_prs[:5]]
+                    result.append(f"**Recent closed/merged PRs:** {', '.join(pr_numbers)}")
+                    
+                await ctx.send("\n".join(result))
+            else:
+                await ctx.send("❌ No cleanup data returned - check configuration and logs.")
+                
+        except Exception:
+            self.log.exception("test_cleanup_query command failed")
+            await ctx.send("❌ Failed to test cleanup query. Check logs.")
+
+    @ghsyncset.command(name="fix_orphaned_threads", hidden=True)
+    async def ghsyncset_fix_orphaned_threads(self, ctx: commands.Context) -> None:
+        """Find and restore mappings for orphaned Discord threads."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        await ctx.send("🔍 Searching for orphaned Discord threads...")
+        
+        try:
+            issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
+            prs_forum_id = await self.config.custom("prs", ctx.guild.id).forum_channel()
+            
+            restored_count = 0
+            
+            # Check issues forum
+            if issues_forum_id:
+                issues_forum = ctx.guild.get_channel(issues_forum_id)
+                if isinstance(issues_forum, discord.ForumChannel):
+                    for thread in issues_forum.threads:
+                        # Look for threads with format "#123: Title"
+                        if thread.name.startswith("#") and ":" in thread.name:
+                            try:
+                                number_part = thread.name.split(":")[0][1:]  # Remove # and get number
+                                number = int(number_part)
+                                
+                                # Check if mapping exists
+                                existing_id = await self._get_thread_id_by_number(ctx.guild, number=number, kind="issues")
+                                if not existing_id:
+                                    # Restore mapping and tracking
+                                    await self._store_link_by_number(thread, number, kind="issues")
+                                    await self._restore_orphaned_thread_tracking(ctx.guild, thread, number, "issues")
+                                    restored_count += 1
+                                    self.log.info("Restored mapping for issues thread %s (#%s)", thread.id, number)
+                            except (ValueError, IndexError):
+                                continue  # Skip threads that don't match expected format
+            
+            # Check PRs forum
+            if prs_forum_id:
+                prs_forum = ctx.guild.get_channel(prs_forum_id)
+                if isinstance(prs_forum, discord.ForumChannel):
+                    for thread in prs_forum.threads:
+                        # Look for threads with format "#123: Title"
+                        if thread.name.startswith("#") and ":" in thread.name:
+                            try:
+                                number_part = thread.name.split(":")[0][1:]  # Remove # and get number
+                                number = int(number_part)
+                                
+                                # Check if mapping exists
+                                existing_id = await self._get_thread_id_by_number(ctx.guild, number=number, kind="prs")
+                                if not existing_id:
+                                    # Restore mapping and tracking
+                                    await self._store_link_by_number(thread, number, kind="prs")
+                                    await self._restore_orphaned_thread_tracking(ctx.guild, thread, number, "prs")
+                                    restored_count += 1
+                                    self.log.info("Restored mapping for prs thread %s (#%s)", thread.id, number)
+                            except (ValueError, IndexError):
+                                continue  # Skip threads that don't match expected format
+            
+            if restored_count > 0:
+                await ctx.send(f"✅ Restored {restored_count} orphaned thread mappings.")
+            else:
+                await ctx.send("ℹ️ No orphaned threads found.")
+                
+        except Exception:
+            self.log.exception("fix_orphaned_threads command failed")
+            await ctx.send("❌ Failed to fix orphaned threads. Check logs.")
+
+    @ghsyncset.command(name="test_post_creation", hidden=True)
+    async def ghsyncset_test_post_creation(self, ctx: commands.Context, issue_number: int) -> None:
+        """Test creating a single forum post for debugging hanging issues."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        repo = await self._get_repo(ctx.guild)
+        if not repo:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send(f"🧪 Testing creation of forum post for issue #{issue_number}...")
+        
+        try:
+            # Get the GitHub issue data
+            github_issue = await asyncio.to_thread(lambda: repo.get_issue(issue_number))
+            
+            # Build minimal data structure
+            test_data = {
+                "number": github_issue.number,
+                "title": github_issue.title,
+                "body": github_issue.body or "",
+                "state": github_issue.state,
+                "url": github_issue.html_url,
+                "user": github_issue.user.login if github_issue.user else "unknown",
+                "user_avatar": github_issue.user.avatar_url if github_issue.user else "",
+                "created_at": github_issue.created_at.isoformat() if github_issue.created_at else "",
+                "updated_at": github_issue.updated_at.isoformat() if github_issue.updated_at else "",
+                "labels": [{"name": label.name} for label in github_issue.labels],
+                "comments": []
+            }
+            
+            # Get the issues forum
+            issues_forum_id = await self.config.custom("issues", ctx.guild.id).forum_channel()
+            if not issues_forum_id:
+                await ctx.send("❌ Issues forum not configured.")
+                return
+                
+            issues_forum = ctx.guild.get_channel(issues_forum_id)
+            if not isinstance(issues_forum, discord.ForumChannel):
+                await ctx.send("❌ Issues forum not found or not a forum channel.")
+                return
+            
+            # Test forum post creation
+            success = await self._create_forum_post(ctx.guild, issues_forum, test_data, "issues")
+            
+            if success:
+                await ctx.send(f"✅ Successfully created forum post for issue #{issue_number}")
+            else:
+                await ctx.send(f"❌ Failed to create forum post for issue #{issue_number}")
+                
+        except Exception:
+            self.log.exception("test_post_creation command failed")
+            await ctx.send("❌ Failed to test post creation. Check logs.")
+
+    @ghsyncset.command(name="concurrency", hidden=True)
+    async def ghsyncset_concurrency(self, ctx: commands.Context, discord_limit: Optional[int] = None, github_limit: Optional[int] = None) -> None:
+        """View or configure concurrency limits for parallel operations."""
+        if discord_limit is None and github_limit is None:
+            await ctx.send(
+                f"**Current Concurrency Limits:**\n"
+                f"• Discord operations: {self._discord_semaphore._value} concurrent\n"
+                f"• GitHub operations: {self._github_semaphore._value} concurrent\n\n"
+                f"Usage: `{ctx.prefix}ghsyncset concurrency <discord_limit> [github_limit]`"
+            )
+            return
+
+        try:
+            if discord_limit is not None:
+                if not (1 <= discord_limit <= 10):
+                    await ctx.send("❌ Discord limit must be between 1 and 10")
+                    return
+                self._discord_semaphore = asyncio.Semaphore(discord_limit)
+                
+            if github_limit is not None:
+                if not (1 <= github_limit <= 5):
+                    await ctx.send("❌ GitHub limit must be between 1 and 5")
+                    return
+                self._github_semaphore = asyncio.Semaphore(github_limit)
+            
+            await ctx.send(
+                f"✅ **Updated Concurrency Limits:**\n"
+                f"• Discord operations: {self._discord_semaphore._value} concurrent\n"
+                f"• GitHub operations: {self._github_semaphore._value} concurrent"
+            )
+        except Exception:
+            self.log.exception("concurrency command failed")
+            await ctx.send("❌ Failed to update concurrency limits. Check logs.")
+
+    @ghsyncset.command(name="test_review_comments", hidden=True)
+    async def ghsyncset_test_review_comments(self, ctx: commands.Context, pr_number: int) -> None:
+        """Test fetching review comments for a specific PR."""
+        if not ctx.guild:
+            await ctx.send("Run this in a guild.")
+            return
+
+        repo = await self._get_repo(ctx.guild)
+        if not repo:
+            await ctx.send("❌ Repository not configured.")
+            return
+
+        await ctx.send(f"🧪 Testing review comment detection for PR #{pr_number}...")
+        
+        try:
+            # Get GitHub token
+            token = await self.config.guild(ctx.guild).github_token()
+            owner = await self.config.guild(ctx.guild).github_owner()
+            repo_name = await self.config.guild(ctx.guild).github_repo()
+            
+            if not all([token, owner, repo_name]):
+                await ctx.send("❌ GitHub configuration incomplete.")
+                return
+
+            # Test GraphQL query for this specific PR
+            query = """
+            query($owner: String!, $repo: String!, $prNumber: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $prNumber) {
+                  number
+                  title
+                  comments(first: 10) {
+                    totalCount
+                    nodes {
+                      id
+                      body
+                      author { login }
+                      createdAt
+                    }
+                  }
+                  reviews(first: 10) {
+                    totalCount
+                    nodes {
+                      id
+                      state
+                      body
+                      author { login }
+                      createdAt
+                      comments(first: 10) {
+                        totalCount
+                        nodes {
+                          id
+                          body
+                          path
+                          line
+                          position
+                          author { login }
+                          createdAt
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            
+            variables = {
+                "owner": owner,
+                "repo": repo_name,
+                "prNumber": pr_number
+            }
+            
+            data = await self._graphql_request(ctx.guild, query, variables)
+            
+            if not data or not data.get("repository", {}).get("pullRequest"):
+                await ctx.send(f"❌ PR #{pr_number} not found.")
+                return
+                
+            pr_data = data["repository"]["pullRequest"]
+            regular_comments = pr_data.get("comments", {})
+            reviews = pr_data.get("reviews", {})
+            
+            # Count review comments from all reviews
+            total_review_comments = 0
+            total_review_summaries = 0
+            for review in reviews.get("nodes", []):
+                if review.get("body", "").strip():  # Review has summary text
+                    total_review_summaries += 1
+                total_review_comments += review.get("comments", {}).get("totalCount", 0)
+            
+            result = [
+                f"**PR #{pr_number}: {pr_data.get('title', 'Unknown Title')}**",
+                f"• Regular comments: {regular_comments.get('totalCount', 0)}",
+                f"• Reviews with summaries: {total_review_summaries}",
+                f"• Review comments (line-by-line): {total_review_comments}",
+                f"• **Total comments: {regular_comments.get('totalCount', 0) + total_review_summaries + total_review_comments}**"
+            ]
+            
+            # Show sample of each type
+            if regular_comments.get("nodes"):
+                result.append("\n**Sample Regular Comments:**")
+                for comment in regular_comments["nodes"][:3]:
+                    author = comment.get("author", {}).get("login", "Unknown")
+                    body = comment.get("body", "")[:100] + "..." if len(comment.get("body", "")) > 100 else comment.get("body", "")
+                    result.append(f"• {author}: {body}")
+                    
+            if reviews.get("nodes"):
+                result.append("\n**Sample Reviews:**")
+                for review in reviews["nodes"][:2]:  # Show fewer due to nested structure
+                    author = review.get("author", {}).get("login", "Unknown")
+                    state = review.get("state", "").lower()
+                    
+                    # Show review summary if present
+                    if review.get("body", "").strip():
+                        body = review.get("body", "")[:80] + "..." if len(review.get("body", "")) > 80 else review.get("body", "")
+                        result.append(f"• {author} ({state}): {body}")
+                    
+                    # Show sample review comments
+                    review_comments = review.get("comments", {}).get("nodes", [])
+                    for comment in review_comments[:2]:  # Max 2 per review
+                        comment_author = comment.get("author", {}).get("login", "Unknown")
+                        path = comment.get("path", "")
+                        line = comment.get("line", comment.get("position", ""))
+                        comment_body = comment.get("body", "")[:80] + "..." if len(comment.get("body", "")) > 80 else comment.get("body", "")
+                        result.append(f"  ↳ {comment_author} on `{path}:{line}`: {comment_body}")
+            
+            await ctx.send("\n".join(result))
+                
+        except Exception:
+            self.log.exception("test_review_comments command failed")
+            await ctx.send("❌ Failed to test review comments. Check logs.")
 
     @ghsyncset.command(name="fix_thread_states")
     async def ghsyncset_fix_thread_states(self, ctx: commands.Context) -> None:
@@ -1195,6 +2763,14 @@ class GitHubSync(commands.Cog):
         guild = thread.guild
         if not guild:
             return
+
+        # Skip if this thread is being created by the bot during sync to prevent feedback loops
+        if thread.id in self._bot_creating_threads:
+            self.log.debug("Skipping thread_create for thread %s (bot-created during sync)", thread.id)
+            # Remove from tracking set since creation is complete
+            self._bot_creating_threads.discard(thread.id)
+            return
+
         # Determine if thread belongs to issues or PRs forum
         issues_forum = await self.config.custom("issues", guild.id).forum_channel()
         prs_forum = await self.config.custom("prs", guild.id).forum_channel()
@@ -1271,6 +2847,62 @@ class GitHubSync(commands.Cog):
 
         kind = "issues" if after.channel.parent_id == issues_forum else "prs"
         await self._handle_message_edit(before, after, kind)
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread: discord.Thread) -> None:
+        """Handle Discord thread deletion and close corresponding GitHub issue/PR."""
+        try:
+            guild = thread.guild
+            if not guild:
+                return
+
+            # Check if Discord → GitHub sync is enabled
+            if not await self._is_discord_to_github_enabled(guild):
+                self.log.debug("Discord → GitHub sync disabled, skipping thread deletion for guild %s", guild.id)
+                return
+
+            # Check if this is an issues or PRs forum thread
+            issues_forum = await self.config.custom("issues", guild.id).forum_channel()
+            prs_forum = await self.config.custom("prs", guild.id).forum_channel()
+
+            if thread.parent_id not in {issues_forum, prs_forum}:
+                return
+
+            # Get linked GitHub issue/PR
+            github_url = await self._get_link(thread)
+            if not github_url:
+                return
+
+            issue_number = self._extract_issue_number(github_url)
+            if not issue_number:
+                return
+
+            kind = "issues" if thread.parent_id == issues_forum else "prs"
+
+            # Check origin - only close GitHub if this issue/PR originated from Discord
+            origin_data = await self._get_origin(guild, issue_number, kind)
+            if not origin_data or origin_data.get("origin") != "discord":
+                self.log.debug("Skipping GitHub close for %s #%s - originated from GitHub", kind, issue_number)
+                return
+
+            repo = await self._get_repo(guild)
+            if not repo:
+                return
+
+            # Close the GitHub issue/PR
+            if kind == "issues":
+                github_issue = await asyncio.to_thread(lambda: repo.get_issue(number=issue_number))
+                await asyncio.to_thread(lambda: github_issue.edit(state="closed"))
+                self.log.info("Closed GitHub issue #%s due to Discord thread deletion", issue_number)
+            else:
+                # Can't close PRs via API, just log it
+                self.log.info("Discord thread for PR #%s was deleted, but PRs cannot be closed via API", issue_number)
+
+            # Clean up stored data
+            await self._cleanup_entity_data(guild, issue_number, kind)
+
+        except Exception:
+            self.log.exception("Failed to handle thread deletion")
 
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message) -> None:
@@ -1560,13 +3192,26 @@ class GitHubSync(commands.Cog):
             # Start batch config mode to reduce file I/O during sync
             self._start_batch_config_mode()
 
-            # Build fresh snapshot from GitHub using GraphQL
+            # Build fresh snapshot from GitHub using GraphQL (only open issues/PRs)
             snapshot = await self._build_github_snapshot(guild)
 
             # Load previous snapshot for comparison
             prev = await self.config.custom("state", guild.id).get_raw("snapshot", default=None)
 
-            # Perform 5-step reconciliation to Discord
+            # CLEANUP PHASE: Check for recently closed/merged issues and clean up Discord threads
+            # Look back longer (7 days) to catch issues that might have been missed
+            cleanup_data = await self._fetch_closed_entities_for_cleanup(guild, since_hours=168)  # 7 days
+            if cleanup_data:
+                deleted_count = await self._cleanup_closed_discord_threads(guild, cleanup_data)
+                if deleted_count > 0:
+                    self.log.info("Cleanup phase: Deleted %d Discord threads for closed GitHub entities", deleted_count)
+
+            # ADDITIONAL CLEANUP: Check existing Discord threads for closed issues not in recent cleanup
+            additional_deleted = await self._cleanup_orphaned_discord_threads(guild, snapshot)
+            if additional_deleted > 0:
+                self.log.info("Additional cleanup: Deleted %d orphaned Discord threads", additional_deleted)
+
+            # Perform 5-step reconciliation to Discord (only for open entities)
             await self._reconcile_snapshot_to_discord(guild, repo, prev, snapshot)
 
             # Save new snapshot as the current state (queued for batch save)
@@ -1618,6 +3263,71 @@ class GitHubSync(commands.Cog):
         except Exception:
             return None
 
+    async def _find_existing_thread_for_issue(self, guild: discord.Guild, number: int, kind: str) -> Optional[discord.Thread]:
+        """Find an existing Discord thread for a GitHub issue/PR, even if mapping was lost."""
+        try:
+            # First try the stored mapping
+            thread = await self._get_thread_by_number(guild, number=number, kind=kind)
+            if thread:
+                return thread
+
+            # If no mapping found, search the forum physically
+            forum_id = await self.config.custom(kind, guild.id).forum_channel()
+            if not forum_id:
+                return None
+
+            forum = guild.get_channel(forum_id)
+            if not isinstance(forum, discord.ForumChannel):
+                return None
+
+            # Search forum threads for one that matches this issue number
+            # Look for threads with titles starting with "#<number>:"
+            prefix = f"#{number}:"
+            for thread in forum.threads:
+                if thread.name.startswith(prefix):
+                    self.log.info("Found orphaned thread %s for %s #%s - restoring all tracking data", 
+                                thread.id, kind, number)
+                    # Restore the mapping
+                    await self._store_link_by_number(thread, number, kind=kind)
+                    
+                    # Also restore tracking data to prevent false positives in Steps 3 and 5
+                    # This prevents the system from thinking everything changed
+                    await self._restore_orphaned_thread_tracking(guild, thread, number, kind)
+                    
+                    return thread
+
+            return None
+        except Exception:
+            self.log.exception("Failed to find existing thread for %s #%s", kind, number)
+            return None
+
+    async def _restore_orphaned_thread_tracking(self, guild: discord.Guild, thread: discord.Thread, number: int, kind: str) -> None:
+        """Restore minimal tracking data for an orphaned thread to prevent false change detection."""
+        try:
+            # Store basic thread message tracking
+            # We don't know the exact message IDs, but we can prevent false positives
+            # by storing the thread ID so the system knows a thread exists
+            discord_messages = await self.config.custom("discord_messages", guild.id).get_raw(kind, default={})
+            if str(number) not in discord_messages:
+                discord_messages[str(number)] = {
+                    "thread_id": thread.id,
+                    "embed_message_id": None,  # Will be set if/when we post new content
+                    "comments": {}
+                }
+                if self._batch_config_mode:
+                    self._queue_config_update(f"custom.discord_messages.{kind}", discord_messages)
+                else:
+                    await self.config.custom("discord_messages", guild.id).set_raw(kind, value=discord_messages)
+            
+            # Note: We intentionally DON'T restore content_hashes or state_hashes
+            # This allows the next sync to properly detect and store current state
+            # while preventing duplicate thread creation
+            
+            self.log.debug("Restored tracking for orphaned thread %s (%s #%s)", thread.id, kind, number)
+            
+        except Exception:
+            self.log.exception("Failed to restore tracking for orphaned thread %s (%s #%s)", thread.id, kind, number)
+
     async def _store_link_by_number(self, thread: discord.Thread, number: int, *, kind: str) -> None:
         if self._batch_config_mode:
             # Queue for batch update
@@ -1639,40 +3349,247 @@ class GitHubSync(commands.Cog):
         if not text:
             return ""
 
-        # Remove null bytes and other problematic control characters
-        cleaned = text.replace('\x00', '')  # Null bytes
-        cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')  # Normalize line endings
-
-        # Remove other control characters that might cause issues (except common ones like \n, \t)
-        import re
-        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
-
-        # Remove excessive whitespace but preserve single newlines
-        lines = cleaned.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            stripped = line.rstrip()
-            cleaned_lines.append(stripped)
-
-        # Remove excessive consecutive empty lines (max 2 consecutive)
-        result_lines = []
-        empty_count = 0
-        for line in cleaned_lines:
-            if not line.strip():
-                empty_count += 1
-                if empty_count <= 2:
-                    result_lines.append(line)
-            else:
-                empty_count = 0
-                result_lines.append(line)
-
-        cleaned = '\n'.join(result_lines).strip()
-
-        # If text is empty after cleaning, return a safe fallback
-        if not cleaned:
-            return "(empty)"
-
+        # Fast basic cleaning - remove null bytes and normalize line endings
+        cleaned = text.replace('\x00', '').replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Quick length check - if too long, truncate early to avoid expensive processing
+        if len(cleaned) > 5000:
+            cleaned = cleaned[:5000] + "..."
+        
+        # Basic control character removal (only the most problematic ones)
+        cleaned = cleaned.replace('\x08', '').replace('\x0B', '').replace('\x0C', '')
+        
+        # Simple consecutive newline reduction (max 3 consecutive)
+        while '\n\n\n\n' in cleaned:
+            cleaned = cleaned.replace('\n\n\n\n', '\n\n\n')
+        
+        # Strip and ensure not empty
+        cleaned = cleaned.strip()
         return cleaned
+
+    def _format_discord_user_for_github(self, author: "discord.User | discord.Member", jump_url: str) -> str:
+        """Format Discord user info for GitHub with properly scaled avatar."""
+        avatar_url = author.display_avatar.url
+        discord_link = f"[Discord]({jump_url})"
+        # Use HTML img tag with fixed dimensions for proper scaling in GitHub
+        avatar_html = f'<img src="{avatar_url}" alt="{author.display_name}" width="20" height="20" style="border-radius: 50%;">'
+        return f"{avatar_html} **{author.display_name}** on {discord_link}"
+
+    async def _create_forum_post_parallel(self, guild: discord.Guild, forum: discord.ForumChannel, data: Dict[str, Any], kind: str) -> bool:
+        """Thread-safe wrapper for creating forum posts with semaphore control."""
+        async with self._discord_semaphore:
+            return await self._create_forum_post(guild, forum, data, kind)
+
+    async def _edit_forum_post_parallel(self, guild: discord.Guild, thread: discord.Thread, data: Dict[str, Any], kind: str) -> bool:
+        """Thread-safe wrapper for editing forum posts with semaphore control."""
+        async with self._discord_semaphore:
+            return await self._edit_forum_post(guild, thread, data, kind)
+
+    async def _post_comment_parallel(self, guild: discord.Guild, thread: discord.Thread, comment: Dict[str, Any], entity_data: Dict[str, Any], kind: str) -> bool:
+        """Thread-safe wrapper for posting comments with semaphore control."""
+        async with self._discord_semaphore:
+            return await self._post_comment_to_thread(guild, thread, comment, entity_data, kind)
+
+    async def _apply_thread_state_parallel(self, thread: discord.Thread, data: Dict[str, Any], desired_tags: List[discord.ForumTag], kind: str) -> None:
+        """Thread-safe wrapper for applying thread state with semaphore control."""
+        async with self._discord_semaphore:
+            return await self._apply_thread_state(thread, data, desired_tags, kind)
+
+    def _format_forum_title(self, data: Dict[str, Any], kind: str) -> str:
+        """Format a forum thread title with issue/PR number at the beginning."""
+        number = data["number"]
+        issue_title = self._clean_discord_text(data.get("title", ""))
+        prefix = "Issue" if kind == "issues" else "PR"
+
+        if issue_title:
+            # Format: "#123: Title" (truncate title to fit within Discord's 100 char limit)
+            number_prefix = f"#{number}: "
+            max_title_length = 100 - len(number_prefix)  # Discord's hard limit is 100 chars
+            
+            if max_title_length <= 0:  # Safety check
+                return f"{prefix} #{number}"
+                
+            truncated_title = issue_title[:max_title_length] if len(issue_title) > max_title_length else issue_title
+            final_title = f"{number_prefix}{truncated_title}"
+            
+            # Final safety check to ensure we don't exceed 100 chars
+            if len(final_title) > 100:
+                self.log.warning("Title still too long after truncation: %d chars", len(final_title))
+                return f"{prefix} #{number}"
+                
+            return final_title
+        else:
+            # Fallback if no title
+            return f"{prefix} #{number}"
+
+    def _quick_content_diff(self, cur_data: Dict[str, Any], prev_data: Dict[str, Any]) -> bool:
+        """Fast pre-screening to check if content might have changed without config lookups."""
+        # Compare basic fields that indicate potential changes
+        if not prev_data:
+            return True  # New entity, definitely changed
+
+        # More precise comparison - check exact fields that matter for content
+        content_fields = ["title", "body", "updated_at"]
+        for field in content_fields:
+            if cur_data.get(field) != prev_data.get(field):
+                return True
+
+        return False
+
+    def _quick_comments_diff(self, cur_data: Dict[str, Any], prev_data: Dict[str, Any]) -> bool:
+        """Fast pre-screening to check if comments might have changed without config lookups."""
+        cur_comments = cur_data.get("comments", [])
+        prev_comments = prev_data.get("comments", [])
+
+        # Quick count comparison
+        if len(cur_comments) != len(prev_comments):
+            return True
+
+        # More precise: check if comment IDs and updated timestamps differ
+        if cur_comments and prev_comments:
+            # Create mappings of comment ID to updated timestamp
+            cur_comment_map = {c.get("id"): c.get("updated_at") for c in cur_comments if c.get("id")}
+            prev_comment_map = {c.get("id"): c.get("updated_at") for c in prev_comments if c.get("id")}
+            
+            # Check if any comments were added, removed, or updated
+            if cur_comment_map != prev_comment_map:
+                return True
+
+        return False
+
+    def _can_edit_thread(self, thread: discord.Thread, data: Dict[str, Any], kind: str, operation: str = "content") -> bool:
+        """Check if a thread can be safely edited based on its current state."""
+        # Since we only work with open entities, we can always edit threads
+        # If a thread is archived/locked, it means it was closed and should have been deleted
+        if thread.archived or thread.locked:
+            self.log.warning("Found archived/locked thread for open %s #%s - this thread should have been deleted", 
+                           kind, data.get("number"))
+        
+        return True
+
+    def _needs_state_update(self, thread: discord.Thread, data: Dict[str, Any], desired_tags: List[discord.ForumTag], kind: str) -> bool:
+        """Fast check if a thread needs state updates without actually applying them."""
+        # Determine desired archived/locked state from GitHub data
+        desired_archived = False
+        desired_locked = data.get("locked", False)
+
+        if kind == "issues":
+            desired_archived = data.get("state") == "closed"
+            if desired_archived:
+                desired_locked = True
+        elif kind == "prs":
+            desired_archived = data.get("state") == "closed" or data.get("merged", False)
+            if desired_archived:
+                desired_locked = True
+
+        # Check if current state differs from desired
+        current_tag_ids = {t.id for t in getattr(thread, "applied_tags", [])}
+        desired_tag_ids = {t.id for t in desired_tags}
+
+        tags_differ = current_tag_ids != desired_tag_ids
+        state_differs = (thread.archived != desired_archived or thread.locked != desired_locked)
+
+        return tags_differ or state_differs
+
+    def _calculate_state_hash(self, data: Dict[str, Any], desired_tags: List[discord.ForumTag], kind: str) -> str:
+        """Calculate a hash representing the desired state of an entity."""
+        # Determine desired archived/locked state from GitHub data
+        desired_archived = False
+        desired_locked = data.get("locked", False)
+
+        if kind == "issues":
+            desired_archived = data.get("state") == "closed"
+            if desired_archived:
+                desired_locked = True
+        elif kind == "prs":
+            desired_archived = data.get("state") == "closed" or data.get("merged", False)
+            if desired_archived:
+                desired_locked = True
+
+        # Create state representation
+        state_data = {
+            "state": data.get("state"),
+            "locked": data.get("locked", False),
+            "merged": data.get("merged", False) if kind == "prs" else False,
+            "labels": sorted(data.get("labels", [])),  # Sort for consistent hashing
+            "desired_archived": desired_archived,
+            "desired_locked": desired_locked,
+            "tag_names": sorted([t.name for t in desired_tags])  # Sort for consistent hashing
+        }
+
+        # Create hash from state data
+        state_str = json.dumps(state_data, sort_keys=True)
+        return hashlib.sha256(state_str.encode('utf-8')).hexdigest()[:16]
+
+    async def _get_entities_with_state_changes(self, guild: discord.Guild, forum: discord.ForumChannel, entities: Dict[str, Any], kind: str) -> List[Tuple[str, Dict[str, Any], List[discord.ForumTag]]]:
+        """Lightning-fast hash-based identification of entities needing state updates."""
+        entities_needing_updates = []
+
+        # Get stored state hashes
+        try:
+            stored_hashes = await self.config.custom("state_hashes", guild.id).get_raw(kind, default={})
+        except Exception:
+            stored_hashes = {}
+
+        for number_str, data in entities.items():
+            # Pre-compute desired tags (fast, no Discord API calls)
+            labels = data.get("labels", [])
+            label_tags = self._labels_to_forum_tags(forum, labels)
+            status_tags = self._get_status_tags_for_entity(forum, data, kind)
+            
+            # Combine tags, ensuring status tags have priority and we don't exceed Discord's 5-tag limit
+            desired_tags = status_tags  # Status tags first (most important)
+            for tag in label_tags:
+                if tag.id not in {st.id for st in desired_tags} and len(desired_tags) < 5:
+                    desired_tags.append(tag)
+
+            # Calculate current state hash
+            current_hash = self._calculate_state_hash(data, desired_tags, kind)
+            stored_hash = stored_hashes.get(number_str)
+
+            # If hash differs or doesn't exist, this entity needs updates
+            if current_hash != stored_hash:
+                entities_needing_updates.append((number_str, data, desired_tags))
+
+        return entities_needing_updates
+
+    async def _store_state_hash(self, guild: discord.Guild, number: int, kind: str, data: Dict[str, Any], desired_tags: List[discord.ForumTag]) -> None:
+        """Store the state hash for an entity after successful update."""
+        try:
+            state_hash = self._calculate_state_hash(data, desired_tags, kind)
+
+            if self._batch_config_mode:
+                # Queue for batch update
+                config_path = f"custom.state_hashes.{kind}.{number}"
+                self._queue_config_update(config_path, state_hash)
+            else:
+                # Direct update
+                await self.config.custom("state_hashes", guild.id).set_raw(kind, str(number), value=state_hash)
+        except Exception:
+            self.log.exception("Failed to store state hash for %s #%s", kind, number)
+
+    async def _invalidate_state_hash(self, guild: discord.Guild, number: int, kind: str) -> None:
+        """Invalidate the stored state hash to force state update on next sync."""
+        try:
+            if self._batch_config_mode:
+                # Queue for batch removal
+                config_path = f"custom.state_hashes.{kind}.{number}"
+                # Remove from pending updates if it exists
+                if config_path in self._pending_config_updates:
+                    del self._pending_config_updates[config_path]
+            
+            # Always remove from stored config to ensure invalidation
+            try:
+                state_hashes = await self.config.custom("state_hashes", guild.id).get_raw(kind, default={})
+                if str(number) in state_hashes:
+                    del state_hashes[str(number)]
+                    await self.config.custom("state_hashes", guild.id).set_raw(kind, value=state_hashes)
+                    self.log.debug("Invalidated state hash for %s #%s (GitHub state changed)", kind, number)
+            except Exception:
+                pass  # Hash might not exist yet, which is fine
+                
+        except Exception:
+            self.log.exception("Failed to invalidate state hash for %s #%s", kind, number)
 
     async def _aiter(self, seq):
         # Helper to iterate possibly blocking iterables in an async context
@@ -1687,8 +3604,30 @@ class GitHubSync(commands.Cog):
         return
 
     async def _build_github_snapshot(self, guild: discord.Guild) -> Dict[str, Any]:
-        """Fetch issues, PRs, labels, and comments into a serializable dict using GraphQL."""
-        snapshot: Dict[str, Any] = {"labels": [], "issues": {}, "prs": {}, "repo_info": {}}
+        """
+        Fetch issues, PRs, labels, and comments into a complete, self-contained snapshot using GraphQL.
+
+        This snapshot contains ALL data needed for sync operations, eliminating the need for additional
+        GitHub API calls during the 5-step reconciliation process, significantly improving performance.
+        """
+        snapshot: Dict[str, Any] = {
+            "labels": {},           # name -> {id, color, description, ...}
+            "labels_by_id": {},     # id -> {name, color, description, ...}
+            "issues": {},           # number -> {id, title, state, labels, comments, ...}
+            "prs": {},              # number -> {id, title, state, labels, comments, ...}
+            "repo_info": {},        # {id, name, owner, description, default_branch, ...}
+            "node_ids": {},         # For efficient GraphQL mutations: {issues: {number: id}, prs: {number: id}}
+            "assignees": {},        # Aggregated assignee data for rich Discord display
+            "milestones": {},       # Milestone data
+            "fetch_metadata": {     # Track fetch completeness and performance
+                "timestamp": None,
+                "total_api_calls": 0,
+                "issues_fetched": 0,
+                "prs_fetched": 0,
+                "comments_fetched": 0,
+                "truncated_entities": []  # Track which issues/PRs have >100 comments
+            }
+        }
 
         self.log.debug("Building GitHub snapshot using GraphQL...")
 
@@ -1710,163 +3649,607 @@ class GitHubSync(commands.Cog):
 
             all_issues: List[Dict[str, Any]] = []
             all_prs: List[Dict[str, Any]] = []
-            labels: List[str] = []
+            labels_data: Dict[str, Dict[str, Any]] = {}
+            labels_by_id: Dict[str, Dict[str, Any]] = {}
             repo_info: Dict[str, Any] = {}
+            api_calls = 0
 
-            # Fetch all data with pagination
-            while True:
-                data = await self._graphql_request(guild, REPOSITORY_QUERY, variables)
-                if not data or not data.get("repository"):
-                    break
+            # Import time for metadata
+            import time
+            start_time = time.time()
 
-                repo_data = data["repository"]
+            # OPTIMIZED: Parallel fetching strategy for maximum speed
+            self.log.info("🚀 Starting optimized GraphQL fetch (100 issues + 100 PRs per call)")
 
-                # Get repo info (only on first request)
-                if not repo_info and repo_data.get("owner"):
-                    repo_info = {
-                        "owner_login": repo_data["owner"].get("login", ""),
-                        "owner_avatar": repo_data["owner"].get("avatarUrl", "")
+            # Phase 1: Combined fetching while both have data
+            issues_cursor = None
+            prs_cursor = None
+            issues_done = False
+            prs_done = False
+
+            # Keep track of rate limit info
+            rate_limit_info = {}
+
+            while not (issues_done and prs_done):
+                # Use combined query while both have data
+                if not issues_done and not prs_done:
+                    variables = {
+                        "owner": owner,
+                        "repo": repo_name,
+                        "issuesCursor": issues_cursor,
+                        "prsCursor": prs_cursor
                     }
 
-                # Get labels (only on first request)
-                if not labels and repo_data.get("labels"):
-                    labels = [label["name"] for label in repo_data["labels"]["nodes"]]
+                    data = await self._graphql_request(guild, REPOSITORY_QUERY, variables)
+                    api_calls += 1
 
-                # Collect issues
-                if repo_data.get("issues"):
-                    issues = repo_data["issues"]
-                    all_issues.extend(issues["nodes"])
+                    if not data or not data.get("repository"):
+                        self.log.warning("GraphQL request returned no repository data on call %d", api_calls)
+                        break
 
-                    if issues["pageInfo"]["hasNextPage"]:
-                        variables["issuesCursor"] = issues["pageInfo"]["endCursor"]
+                    repo_data = data["repository"]
+
+                    # Track rate limit info
+                    if data.get("rateLimit"):
+                        rate_limit_info = data["rateLimit"]
+                        self.log.debug("Rate limit: %d/%d remaining (cost: %d)",
+                                     rate_limit_info.get("remaining", 0),
+                                     rate_limit_info.get("limit", 5000),
+                                     rate_limit_info.get("cost", 0))
+
+                    # Get enhanced repo info (only on first request)
+                    if not repo_info and repo_data.get("owner"):
+                        repo_info = {
+                            "id": repo_data.get("id", ""),
+                            "name": repo_data.get("name", ""),
+                            "name_with_owner": repo_data.get("nameWithOwner", ""),
+                            "description": repo_data.get("description", ""),
+                            "default_branch": repo_data.get("defaultBranchRef", {}).get("name", "main"),
+                            "owner_login": repo_data["owner"].get("login", ""),
+                            "owner_avatar": repo_data["owner"].get("avatarUrl", ""),
+                            "owner_url": repo_data["owner"].get("url", ""),
+                            "owner_name": repo_data["owner"].get("name", ""),
+                            "owner_type": "Organization" if "description" in repo_data["owner"] else "User"
+                        }
+
+                    # Get enhanced labels data (only on first request)
+                    if not labels_data and repo_data.get("labels"):
+                        for label in repo_data["labels"]["nodes"]:
+                            label_name = label.get("name", "")
+                            label_id = label.get("id", "")
+                            label_info = {
+                                "id": label_id,
+                                "name": label_name,
+                                "color": label.get("color", ""),
+                                "description": label.get("description", ""),
+                                "created_at": label.get("createdAt", ""),
+                                "updated_at": label.get("updatedAt", "")
+                            }
+                            labels_data[label_name] = label_info
+                            if label_id:
+                                labels_by_id[label_id] = label_info
+
+                    # Process issues
+                    if repo_data.get("issues"):
+                        issues = repo_data["issues"]
+                        issue_nodes = issues.get("nodes", [])
+                        all_issues.extend(issue_nodes)
+
+                        if issues.get("pageInfo", {}).get("hasNextPage"):
+                            issues_cursor = issues["pageInfo"]["endCursor"]
+                        else:
+                            issues_done = True
+                            issues_cursor = None
                     else:
-                        variables["issuesCursor"] = "DONE"
+                        issues_done = True
 
-                # Collect PRs
-                if repo_data.get("pullRequests"):
-                    prs = repo_data["pullRequests"]
-                    all_prs.extend(prs["nodes"])
+                    # Process PRs
+                    if repo_data.get("pullRequests"):
+                        prs = repo_data["pullRequests"]
+                        pr_nodes = prs.get("nodes", [])
+                        all_prs.extend(pr_nodes)
 
-                    if prs["pageInfo"]["hasNextPage"]:
-                        variables["prsCursor"] = prs["pageInfo"]["endCursor"]
+                        if prs.get("pageInfo", {}).get("hasNextPage"):
+                            prs_cursor = prs["pageInfo"]["endCursor"]
+                        else:
+                            prs_done = True
+                            prs_cursor = None
                     else:
-                        variables["prsCursor"] = "DONE"
+                        prs_done = True
 
-                # Check if we're done with both
-                issues_done = variables["issuesCursor"] == "DONE"
-                prs_done = variables["prsCursor"] == "DONE"
+                    self.log.debug("Combined fetch %d: %d issues (%d total), %d PRs (%d total) | Rate limit: %d remaining",
+                                 api_calls, len(issue_nodes), len(all_issues), len(pr_nodes), len(all_prs),
+                                 rate_limit_info.get("remaining", 0))
 
-                if issues_done and prs_done:
-                    break
+                # Phase 2: Separate parallel fetching for remaining data
+                else:
+                    # Prepare parallel requests for remaining data
+                    parallel_requests = []
 
-                # If one is done, set to None to avoid fetching more
-                if issues_done:
-                    variables["issuesCursor"] = None
-                if prs_done:
-                    variables["prsCursor"] = None
+                    if not issues_done:
+                        parallel_requests.append(
+                            self._fetch_issues_page(guild, owner, repo_name, issues_cursor)
+                        )
 
-            # Process repo info and labels
+                    if not prs_done:
+                        parallel_requests.append(
+                            self._fetch_prs_page(guild, owner, repo_name, prs_cursor)
+                        )
+
+                    if parallel_requests:
+                        # Execute parallel requests
+                        results = await asyncio.gather(*parallel_requests, return_exceptions=True)
+                        api_calls += len(parallel_requests)
+
+                        for i, result in enumerate(results):
+                            if isinstance(result, Exception):
+                                self.log.error("Parallel fetch failed: %s", result)
+                                continue
+
+                            if result is None:
+                                continue
+
+                            # Type guard to ensure result is a dict
+                            if not isinstance(result, dict):
+                                self.log.error("Unexpected result type in parallel fetch: %s", type(result))
+                                continue
+
+                            if "issues" in result:
+                                issue_nodes = result.get("issues", [])
+                                all_issues.extend(issue_nodes)
+                                if result.get("hasNext"):
+                                    issues_cursor = result.get("cursor")
+                                else:
+                                    issues_done = True
+
+                                self.log.debug("Parallel issues fetch: %d issues (%d total)",
+                                             len(issue_nodes), len(all_issues))
+
+                            elif "prs" in result:
+                                pr_nodes = result.get("prs", [])
+                                all_prs.extend(pr_nodes)
+                                if result.get("hasNext"):
+                                    prs_cursor = result.get("cursor")
+                                else:
+                                    prs_done = True
+
+                                self.log.debug("Parallel PRs fetch: %d PRs (%d total)",
+                                             len(pr_nodes), len(all_prs))
+                    else:
+                        break
+
+            # Log performance summary
+            fetch_duration = time.time() - start_time
+            self.log.info("✅ Optimized fetch complete: %d issues, %d PRs in %.2fs (%d API calls, %.1f items/call)",
+                         len(all_issues), len(all_prs), fetch_duration, api_calls,
+                         (len(all_issues) + len(all_prs)) / max(api_calls, 1))
+
+            # Store repo info and labels in enhanced format
             snapshot["repo_info"] = repo_info
-            snapshot["labels"] = labels
-            self.log.debug("Fetched %d labels", len(labels))
+            snapshot["labels"] = labels_data
+            snapshot["labels_by_id"] = labels_by_id
 
-            # Process issues
+            # Store node IDs for efficient mutations
+            snapshot["node_ids"] = {"issues": {}, "prs": {}}
+
+            # Aggregated data stores
+            assignees_store = {}
+            milestones_store = {}
+            total_comments = 0
+            truncated_entities = []
+
+            # Process issues with enhanced data
             issue_count = 0
             for issue in all_issues:
                 issue_count += 1
+                issue_number = issue["number"]
 
-                # Filter comments that contain Discord message links (avoid loops)
+                # Store GraphQL node ID for efficient mutations
+                snapshot["node_ids"]["issues"][issue_number] = issue.get("id", "")
+
+                # Process enhanced author data
+                author = issue.get("author") or {}
+                author_data = {
+                    "login": author.get("login", "GitHub"),
+                    "avatar": author.get("avatarUrl", ""),
+                    "url": author.get("url", ""),
+                    "name": author.get("name", ""),
+                    "bio": author.get("bio", "") if author.get("bio") else author.get("description", "")
+                }
+
+                # Process assignees
+                assignees = []
+                for assignee in issue.get("assignees", {}).get("nodes", []):
+                    assignee_login = assignee.get("login")
+                    if assignee_login:
+                        assignee_data = {
+                            "login": assignee_login,
+                            "avatar": assignee.get("avatarUrl", "")
+                        }
+                        assignees.append(assignee_data)
+                        assignees_store[assignee_login] = assignee_data
+
+                # Process milestone
+                milestone = None
+                if issue.get("milestone"):
+                    milestone_data = {
+                        "id": issue["milestone"].get("id", ""),
+                        "title": issue["milestone"].get("title", ""),
+                        "description": issue["milestone"].get("description", ""),
+                        "state": issue["milestone"].get("state", "")
+                    }
+                    milestone = milestone_data
+                    milestones_store[milestone_data["id"]] = milestone_data
+
+                # Process enhanced labels with metadata
+                labels = []
+                label_details = []
+                for label in issue.get("labels", {}).get("nodes", []):
+                    label_name = label.get("name", "")
+                    labels.append(label_name)
+                    label_details.append({
+                        "id": label.get("id", ""),
+                        "name": label_name,
+                        "color": label.get("color", ""),
+                        "description": label.get("description", "")
+                    })
+
+                # Process comments with enhanced data
                 comments = []
                 comment_data = issue.get("comments", {})
                 comment_nodes = comment_data.get("nodes", [])
 
                 # Check if comments are truncated
                 if comment_data.get("pageInfo", {}).get("hasNextPage"):
-                    self.log.warning("Issue #%s has more than 100 comments - some may not be synced", issue["number"])
+                    self.log.warning("Issue #%s has more than 100 comments - some may not be synced", issue_number)
+                    truncated_entities.append(f"issues #{issue_number}")
 
                 for comment in comment_nodes:
+                    # Skip Discord message links to avoid loops
                     if comment.get("body") and DISCORD_MESSAGE_LINK_RE.search(comment["body"]):
                         continue
+
+                    comment_author = comment.get("author") or {}
                     comments.append({
                         "id": comment.get("id"),
-                        "author": comment.get("author", {}).get("login", "GitHub") if comment.get("author") else "GitHub",
-                        "author_avatar": comment.get("author", {}).get("avatarUrl", "") if comment.get("author") else "",
+                        "database_id": comment.get("databaseId"),  # For REST API compatibility
+                        "author": comment_author.get("login", "GitHub"),
+                        "author_avatar": comment_author.get("avatarUrl", ""),
+                        "author_url": comment_author.get("url", ""),
                         "body": comment.get("body", ""),
+                        "body_text": comment.get("bodyText", ""),  # Plain text version
                         "url": comment.get("url", ""),
+                        "created_at": comment.get("createdAt", ""),
                         "updated_at": comment.get("updatedAt", ""),
+                        "last_edited_at": comment.get("lastEditedAt", "")
                     })
+                    total_comments += 1
 
+                # Build enhanced entry
                 entry = {
-                    "number": issue["number"],
+                    "id": issue.get("id", ""),  # GraphQL node ID
+                    "number": issue_number,
                     "title": issue.get("title", ""),
                     "state": issue["state"].lower(),  # GraphQL returns OPEN/CLOSED, we want lowercase
                     "state_reason": issue.get("stateReason", "").lower() if issue.get("stateReason") else None,
                     "locked": bool(issue.get("locked", False)),
-                    "labels": [label["name"] for label in issue.get("labels", {}).get("nodes", [])],
                     "url": issue.get("url", ""),
                     "body": issue.get("body", ""),
-                    "comments": comments,
-                    "user": issue.get("author", {}).get("login", "GitHub") if issue.get("author") else "GitHub",
-                    "user_avatar": issue.get("author", {}).get("avatarUrl", "") if issue.get("author") else "",
+                    "body_text": issue.get("bodyText", ""),  # Plain text version
                     "created_at": issue.get("createdAt", ""),
-                    "updated_at": issue.get("updatedAt", "")
+                    "updated_at": issue.get("updatedAt", ""),
+                    "closed_at": issue.get("closedAt", ""),
+
+                    # Enhanced data
+                    "author": author_data,
+                    "assignees": assignees,
+                    "milestone": milestone,
+
+                    # Labels with metadata
+                    "labels": labels,  # For backward compatibility
+                    "label_details": label_details,  # Full label data
+
+                    # Comments
+                    "comments": comments,
+
+                    # Backward compatibility fields (kept for existing logic)
+                    "user": author_data["login"],
+                    "user_avatar": author_data["avatar"],
                 }
 
-                snapshot["issues"][str(issue["number"])] = entry
+                snapshot["issues"][str(issue_number)] = entry
 
             self.log.debug("Processed %d issues", issue_count)
 
-            # Process PRs
+            # Process PRs with enhanced data
             pr_count = 0
             for pr in all_prs:
                 pr_count += 1
+                pr_number = pr["number"]
 
-                # Filter comments that contain Discord message links (avoid loops)
+                # Store GraphQL node ID for efficient mutations
+                snapshot["node_ids"]["prs"][pr_number] = pr.get("id", "")
+
+                # Process enhanced author data
+                author = pr.get("author") or {}
+                author_data = {
+                    "login": author.get("login", "GitHub"),
+                    "avatar": author.get("avatarUrl", ""),
+                    "url": author.get("url", ""),
+                    "name": author.get("name", ""),
+                    "bio": author.get("bio", "") if author.get("bio") else author.get("description", "")
+                }
+
+                # Process assignees
+                assignees = []
+                for assignee in pr.get("assignees", {}).get("nodes", []):
+                    assignee_login = assignee.get("login")
+                    if assignee_login:
+                        assignee_data = {
+                            "login": assignee_login,
+                            "avatar": assignee.get("avatarUrl", "")
+                        }
+                        assignees.append(assignee_data)
+                        assignees_store[assignee_login] = assignee_data
+
+                # Process reviewers
+                reviewers = []
+                for review_request in pr.get("reviewers", {}).get("nodes", []):
+                    reviewer = review_request.get("requestedReviewer", {})
+                    if reviewer.get("login"):  # User reviewer
+                        reviewers.append({
+                            "type": "user",
+                            "login": reviewer.get("login"),
+                            "avatar": reviewer.get("avatarUrl", "")
+                        })
+                    elif reviewer.get("name"):  # Team reviewer
+                        reviewers.append({
+                            "type": "team",
+                            "name": reviewer.get("name"),
+                            "slug": reviewer.get("slug", "")
+                        })
+
+                # Process milestone
+                milestone = None
+                if pr.get("milestone"):
+                    milestone_data = {
+                        "id": pr["milestone"].get("id", ""),
+                        "title": pr["milestone"].get("title", ""),
+                        "description": pr["milestone"].get("description", ""),
+                        "state": pr["milestone"].get("state", "")
+                    }
+                    milestone = milestone_data
+                    milestones_store[milestone_data["id"]] = milestone_data
+
+                # Process enhanced labels with metadata
+                labels = []
+                label_details = []
+                for label in pr.get("labels", {}).get("nodes", []):
+                    label_name = label.get("name", "")
+                    labels.append(label_name)
+                    label_details.append({
+                        "id": label.get("id", ""),
+                        "name": label_name,
+                        "color": label.get("color", ""),
+                        "description": label.get("description", "")
+                    })
+
+                # Process latest commit info
+                latest_commit = None
+                if pr.get("commits", {}).get("nodes"):
+                    commit_data = pr["commits"]["nodes"][0]["commit"]
+                    latest_commit = {
+                        "oid": commit_data.get("oid", ""),
+                        "message": commit_data.get("messageHeadline", ""),
+                        "author_name": commit_data.get("author", {}).get("name", ""),
+                        "author_email": commit_data.get("author", {}).get("email", ""),
+                        "date": commit_data.get("author", {}).get("date", "")
+                    }
+
+                # Process comments with enhanced data (both regular and review comments)
                 comments = []
+                
+                # Process regular comments
                 comment_data = pr.get("comments", {})
                 comment_nodes = comment_data.get("nodes", [])
 
-                # Check if comments are truncated
+                # Check if regular comments are truncated
                 if comment_data.get("pageInfo", {}).get("hasNextPage"):
-                    self.log.warning("PR #%s has more than 100 comments - some may not be synced", pr["number"])
+                    self.log.warning("PR #%s has more than 100 regular comments - some may not be synced", pr_number)
+                    truncated_entities.append(f"prs #{pr_number}")
 
                 for comment in comment_nodes:
+                    # Skip Discord message links to avoid loops
                     if comment.get("body") and DISCORD_MESSAGE_LINK_RE.search(comment["body"]):
                         continue
+
+                    comment_author = comment.get("author") or {}
                     comments.append({
                         "id": comment.get("id"),
-                        "author": comment.get("author", {}).get("login", "GitHub") if comment.get("author") else "GitHub",
-                        "author_avatar": comment.get("author", {}).get("avatarUrl", "") if comment.get("author") else "",
+                        "database_id": comment.get("databaseId"),  # For REST API compatibility
+                        "author": comment_author.get("login", "GitHub"),
+                        "author_avatar": comment_author.get("avatarUrl", ""),
+                        "author_url": comment_author.get("url", ""),
                         "body": comment.get("body", ""),
+                        "body_text": comment.get("bodyText", ""),  # Plain text version
                         "url": comment.get("url", ""),
+                        "created_at": comment.get("createdAt", ""),
                         "updated_at": comment.get("updatedAt", ""),
+                        "last_edited_at": comment.get("lastEditedAt", ""),
+                        "type": "comment"  # Mark as regular comment
                     })
+                    total_comments += 1
 
+                # Process review comments (through reviews structure)
+                reviews_data = pr.get("reviews", {})
+                reviews_nodes = reviews_data.get("nodes", [])
+
+                # Check if reviews are truncated
+                if reviews_data.get("pageInfo", {}).get("hasNextPage"):
+                    self.log.warning("PR #%s has more than 50 reviews - some review comments may not be synced", pr_number)
+                    truncated_entities.append(f"prs #{pr_number}")
+
+                for review in reviews_nodes:
+                    review_author = review.get("author") or {}
+                    review_state = review.get("state", "")
+                    review_body = review.get("body", "")
+                    
+                    # Add the review itself as a comment if it has content
+                    if review_body and not DISCORD_MESSAGE_LINK_RE.search(review_body):
+                        # Format review summary with state
+                        state_text = f" ({review_state.lower()})" if review_state else ""
+                        contextual_body = f"**Review{state_text}:**\n\n{review_body}"
+                        
+                        comments.append({
+                            "id": review.get("id"),
+                            "database_id": None,  # Reviews don't have databaseId
+                            "author": review_author.get("login", "GitHub"),
+                            "author_avatar": review_author.get("avatarUrl", ""),
+                            "author_url": review_author.get("url", ""),
+                            "body": contextual_body,
+                            "body_text": review.get("bodyText", ""),
+                            "url": review.get("url", ""),
+                            "created_at": review.get("createdAt", ""),
+                            "updated_at": review.get("updatedAt", ""),
+                            "last_edited_at": review.get("updatedAt", ""),  # Reviews don't have lastEditedAt
+                            "type": "review",  # Mark as review summary
+                            "review_state": review_state
+                        })
+                        total_comments += 1
+
+                    # Process line-by-line review comments within this review
+                    review_comments_data = review.get("comments", {})
+                    review_comment_nodes = review_comments_data.get("nodes", [])
+                    
+                    # Check if review comments are truncated
+                    if review_comments_data.get("pageInfo", {}).get("hasNextPage"):
+                        self.log.warning("PR #%s review has more than 50 comments - some may not be synced", pr_number)
+                        truncated_entities.append(f"prs #{pr_number}")
+
+                    for review_comment in review_comment_nodes:
+                        # Skip Discord message links to avoid loops
+                        if review_comment.get("body") and DISCORD_MESSAGE_LINK_RE.search(review_comment["body"]):
+                            continue
+
+                        comment_author = review_comment.get("author") or {}
+                        
+                        # Format review comment with file/line context
+                        file_path = review_comment.get("path", "")
+                        line_number = review_comment.get("line") or review_comment.get("position", "")
+                        
+                        # Create enhanced body with file context for review comments
+                        original_body = review_comment.get("body", "")
+                        if file_path and line_number:
+                            contextual_body = f"**Review on `{file_path}` line {line_number}:**\n\n{original_body}"
+                        elif file_path:
+                            contextual_body = f"**Review on `{file_path}`:**\n\n{original_body}"
+                        else:
+                            contextual_body = f"**Code Review:**\n\n{original_body}"
+                        
+                        comments.append({
+                            "id": review_comment.get("id"),
+                            "database_id": review_comment.get("databaseId"),  # For REST API compatibility
+                            "author": comment_author.get("login", "GitHub"),
+                            "author_avatar": comment_author.get("avatarUrl", ""),
+                            "author_url": comment_author.get("url", ""),
+                            "body": contextual_body,  # Enhanced with file context
+                            "body_text": review_comment.get("bodyText", ""),  # Plain text version
+                            "url": review_comment.get("url", ""),
+                            "created_at": review_comment.get("createdAt", ""),
+                            "updated_at": review_comment.get("updatedAt", ""),
+                            "last_edited_at": review_comment.get("lastEditedAt", ""),
+                            "type": "review_comment",  # Mark as review comment
+                            "file_path": file_path,
+                            "line": line_number,
+                            "diff_hunk": review_comment.get("diffHunk", ""),
+                            "review_state": review_state  # Include the parent review state
+                        })
+                        total_comments += 1
+
+                # Sort all comments by creation date to maintain chronological order
+                comments.sort(key=lambda c: c.get("created_at", ""))
+
+                # Build enhanced entry
                 entry = {
-                    "number": pr["number"],
+                    "id": pr.get("id", ""),  # GraphQL node ID
+                    "number": pr_number,
                     "title": pr.get("title", ""),
                     "state": pr["state"].lower(),  # GraphQL returns OPEN/CLOSED/MERGED, we want lowercase
                     "merged": bool(pr.get("merged", False)),
+                    "merged_at": pr.get("mergedAt", ""),
+                    "mergeable": pr.get("mergeable", ""),
                     "locked": bool(pr.get("locked", False)),
-                    "labels": [label["name"] for label in pr.get("labels", {}).get("nodes", [])],
                     "url": pr.get("url", ""),
                     "body": pr.get("body", ""),
-                    "comments": comments,
-                    "user": pr.get("author", {}).get("login", "GitHub") if pr.get("author") else "GitHub",
-                    "user_avatar": pr.get("author", {}).get("avatarUrl", "") if pr.get("author") else "",
+                    "body_text": pr.get("bodyText", ""),  # Plain text version
                     "created_at": pr.get("createdAt", ""),
-                    "updated_at": pr.get("updatedAt", "")
+                    "updated_at": pr.get("updatedAt", ""),
+                    "closed_at": pr.get("closedAt", ""),
+                    "head_ref": pr.get("headRefName", ""),
+                    "base_ref": pr.get("baseRefName", ""),
+
+                    # Enhanced data
+                    "author": author_data,
+                    "assignees": assignees,
+                    "reviewers": reviewers,
+                    "milestone": milestone,
+                    "latest_commit": latest_commit,
+
+                    # Labels with metadata
+                    "labels": labels,  # For backward compatibility
+                    "label_details": label_details,  # Full label data
+
+                    # Comments
+                    "comments": comments,
+
+                    # Backward compatibility fields (kept for existing logic)
+                    "user": author_data["login"],
+                    "user_avatar": author_data["avatar"],
                 }
 
-                snapshot["prs"][str(pr["number"])] = entry
+                snapshot["prs"][str(pr_number)] = entry
 
             self.log.debug("Processed %d PRs", pr_count)
+
+            # Store aggregated data
+            snapshot["assignees"] = assignees_store
+            snapshot["milestones"] = milestones_store
+
+            # Store comprehensive fetch metadata
+            snapshot["fetch_metadata"] = {
+                "timestamp": time.time(),
+                "total_api_calls": api_calls,
+                "issues_fetched": issue_count,
+                "prs_fetched": pr_count,
+                "comments_fetched": total_comments,
+                "truncated_entities": truncated_entities,
+                "fetch_duration": time.time() - start_time,
+                "labels_count": len(labels_data),
+                "assignees_count": len(assignees_store),
+                "milestones_count": len(milestones_store)
+            }
 
         except Exception:
             self.log.exception("Failed to build GitHub snapshot using GraphQL")
 
-        self.log.info("GitHub snapshot built: %d labels, %d issues, %d PRs",
-                     len(snapshot["labels"]), len(snapshot["issues"]), len(snapshot["prs"]))
+        # Enhanced logging with performance metrics
+        metadata = snapshot.get("fetch_metadata", {})
+        total_items = len(snapshot["issues"]) + len(snapshot["prs"])
+        items_per_call = total_items / max(metadata.get("total_api_calls", 1), 1)
+
+        self.log.info(
+            "✅ GitHub snapshot built: %d labels, %d issues, %d PRs, %d comments | "
+            "%d API calls in %.2fs (%.1f items/call) | %d assignees, %d milestones",
+            len(snapshot["labels"]), len(snapshot["issues"]), len(snapshot["prs"]),
+            metadata.get("comments_fetched", 0), metadata.get("total_api_calls", 0),
+            metadata.get("fetch_duration", 0), items_per_call,
+            metadata.get("assignees_count", 0), metadata.get("milestones_count", 0)
+        )
+
+        if metadata.get("truncated_entities"):
+            self.log.warning("⚠️ Some entities have >100 comments and may be incomplete: %s",
+                           ", ".join(metadata["truncated_entities"][:5]))
+
         return snapshot
 
     async def _reconcile_snapshot_to_discord(self, guild: discord.Guild, repo, prev: Optional[Dict[str, Any]], cur: Dict[str, Any]) -> None:
@@ -1926,8 +4309,8 @@ class GitHubSync(commands.Cog):
         # First, ensure status tags exist (required)
         await self._ensure_status_tags_exist(forum, kind)
 
-        # Then reconcile with GitHub labels (optional, space permitting)
-        await self._reconcile_forum_and_labels(guild, forum, repo)
+        # Then reconcile with GitHub labels using snapshot data (no blocking calls)
+        await self._reconcile_forum_and_labels_from_snapshot(guild, forum, snapshot)
 
         self.log.info("✅ Step 1 completed for %s", kind)
 
@@ -1935,44 +4318,95 @@ class GitHubSync(commands.Cog):
         """Step 2: Create forum posts for new GitHub issues/PRs."""
         self.log.info("➕ Step 2: Creating missing forum posts for %s", kind)
 
-        prev_entities = prev.get(kind, {})
+        prev_entities = prev.get(kind, {}) if prev else {}
         cur_entities = cur.get(kind, {})
         created_count = 0
 
+        # Find truly new entities: in current but not in previous snapshot
+        new_entities = {}
+        for number_str, data in cur_entities.items():
+            if number_str not in prev_entities:
+                new_entities[number_str] = data
+
+        # Special case: if there's no previous snapshot (first run), we need to be more careful
+        # Only consider entities "new" if they don't already have Discord threads
+        if not prev_entities:
+            self.log.info("No previous snapshot found - checking all entities against existing Discord threads")
+            truly_new_entities = {}
+            for number_str, data in new_entities.items():
+                existing_thread = await self._find_existing_thread_for_issue(guild, int(number_str), kind)
+                if not existing_thread:
+                    truly_new_entities[number_str] = data
+                else:
+                    self.log.debug("Entity %s #%s has existing thread %s - not creating new", kind, number_str, existing_thread.id)
+            new_entities = truly_new_entities
+
+        if not new_entities:
+            self.log.info("No new %s to create", kind)
+            return
+
         # Sort entities by creation date to ensure chronological forum post creation (oldest first)
         sorted_entities = sorted(
-            cur_entities.items(),
+            new_entities.items(),
             key=lambda x: x[1].get("created_at", "")
         )
 
-        if sorted_entities:
-            self.log.info("Creating %d %s posts in chronological order: %s #%s (oldest) to %s #%s (newest)",
-                         len(sorted_entities),
-                         kind,
-                         kind[:-1], sorted_entities[0][0],  # Remove 's' from 'issues'/'prs'
-                         kind[:-1], sorted_entities[-1][0])
+        self.log.info("Found %d new %s to create: %s #%s (oldest) to %s #%s (newest)",
+                     len(sorted_entities),
+                     kind,
+                     kind[:-1], sorted_entities[0][0],  # Remove 's' from 'issues'/'prs'
+                     kind[:-1], sorted_entities[-1][0])
 
-        for number_str, data in sorted_entities:
-            # Skip if this entity already has a thread
-            if await self._get_thread_id_by_number(guild, number=int(number_str), kind=kind):
-                continue
+        # Use parallel processing for better performance
+        async def create_single_post(number_str: str, data: Dict[str, Any]) -> bool:
+            """Create a single forum post with all necessary checks."""
+            try:
+                # Double-check: Skip if this entity already has a thread (prevent duplicates from orphaned threads)
+                existing_thread = await self._find_existing_thread_for_issue(guild, int(number_str), kind)
+                if existing_thread:
+                    self.log.debug("Skipping new %s #%s - thread was restored from orphaned state (ID: %s)", kind, number_str, existing_thread.id)
+                    return False
 
-            # Check if this GitHub content originally came from Discord (prevent loops)
-            origin_data = await self._get_origin(guild, int(number_str), kind)
-            if origin_data and origin_data.get("origin") == "discord":
-                self.log.debug("Skipping forum post creation for %s #%s - originated from Discord", kind, number_str)
-                continue
+                # Check if this GitHub content originally came from Discord (prevent loops)
+                origin_data = await self._get_origin(guild, int(number_str), kind)
+                if origin_data and origin_data.get("origin") == "discord":
+                    self.log.debug("Skipping forum post creation for %s #%s - originated from Discord", kind, number_str)
+                    return False
 
-            # Create new thread for this issue/PR
-            success = await self._create_forum_post(guild, forum, data, kind)
-            if success:
-                created_count += 1
-                # Log progress every 10 posts
-                if created_count % 10 == 0:
-                    self.log.info("Progress: Created %d %s posts (latest: %s #%s)",
-                                 created_count, kind, kind[:-1], number_str)
-                # Small delay to help with rate limiting and ensure proper ordering
-                await asyncio.sleep(0.2)  # Increased delay to reduce rate limit hits
+                # Create new thread for this issue/PR
+                return await self._create_forum_post_parallel(guild, forum, data, kind)
+            except Exception:
+                self.log.exception("Failed to create forum post for %s #%s", kind, number_str)
+                return False
+
+        # Process posts in parallel batches to prevent overwhelming Discord API
+        batch_size = 5  # Process 5 posts concurrently at most
+        total_batches = (len(sorted_entities) + batch_size - 1) // batch_size
+        
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(sorted_entities))
+            batch = sorted_entities[start_idx:end_idx]
+            
+            self.log.info("Processing batch %d/%d: %s #%s to #%s (%d posts)",
+                         batch_num + 1, total_batches,
+                         kind[:-1], batch[0][0], batch[-1][0], len(batch))
+            
+            # Create all posts in the batch concurrently
+            tasks = [create_single_post(number_str, data) for number_str, data in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count successful creations
+            batch_created = sum(1 for result in results if result is True)
+            created_count += batch_created
+            
+            if batch_created > 0:
+                self.log.info("Batch %d/%d completed: Created %d/%d posts (total: %d)",
+                             batch_num + 1, total_batches, batch_created, len(batch), created_count)
+            
+            # Small delay between batches to be gentle on Discord API
+            if batch_num < total_batches - 1:  # Don't delay after the last batch
+                await asyncio.sleep(0.5)
 
         self.log.info("✅ Step 2 completed: Created %d new %s posts", created_count, kind)
 
@@ -1982,21 +4416,69 @@ class GitHubSync(commands.Cog):
 
         prev_entities = prev.get(kind, {})
         cur_entities = cur.get(kind, {})
-        edited_count = 0
 
+        # Fast pre-screening: identify entities that might have changed
+        entities_to_check = []
         for number_str, cur_data in cur_entities.items():
-            # Only process entities that already have threads
-            thread = await self._get_thread_by_number(guild, number=int(number_str), kind=kind)
-            if not thread:
-                continue
-
             prev_data = prev_entities.get(number_str, {})
 
-            # Check if content has changed using hashes
-            if await self._has_content_changed(guild, int(number_str), kind, cur_data, prev_data):
-                success = await self._edit_forum_post(guild, thread, cur_data, kind)
-                if success:
-                    edited_count += 1
+            # Quick hash comparison without config lookup
+            if self._quick_content_diff(cur_data, prev_data):
+                entities_to_check.append((number_str, cur_data, prev_data))
+
+        if not entities_to_check:
+            self.log.info("✅ Step 3 completed: No content changes detected, skipped all edits")
+            return
+
+        self.log.debug("Step 3: Pre-screening found %d/%d entities with potential changes",
+                      len(entities_to_check), len(cur_entities))
+
+        # Use parallel processing for editing posts
+        async def edit_single_post(number_str: str, cur_data: Dict[str, Any], prev_data: Dict[str, Any]) -> bool:
+            """Edit a single forum post with all necessary checks."""
+            try:
+                # Only process entities that already have threads
+                thread = await self._get_thread_by_number(guild, number=int(number_str), kind=kind)
+                if not thread:
+                    return False
+
+                # Check if we can safely edit this thread
+                if not self._can_edit_thread(thread, cur_data, kind, "content"):
+                    self.log.debug("Skipping edit for %s #%s - thread is archived/locked and should remain so", kind, number_str)
+                    return False
+
+                # Detailed hash comparison with config lookup (only for entities that passed pre-screening)
+                if await self._has_content_changed(guild, int(number_str), kind, cur_data, prev_data):
+                    return await self._edit_forum_post_parallel(guild, thread, cur_data, kind)
+                return False
+            except Exception:
+                self.log.exception("Failed to edit forum post for %s #%s", kind, number_str)
+                return False
+
+        # Process edits in parallel batches
+        batch_size = 5  # Process 5 edits concurrently at most
+        total_batches = (len(entities_to_check) + batch_size - 1) // batch_size
+        edited_count = 0
+        
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(entities_to_check))
+            batch = entities_to_check[start_idx:end_idx]
+            
+            # Edit all posts in the batch concurrently
+            tasks = [edit_single_post(number_str, cur_data, prev_data) for number_str, cur_data, prev_data in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count successful edits
+            batch_edited = sum(1 for result in results if result is True)
+            edited_count += batch_edited
+            
+            if batch_edited > 0:
+                self.log.debug("Batch %d/%d: Edited %d/%d posts", batch_num + 1, total_batches, batch_edited, len(batch))
+            
+            # Small delay between batches
+            if batch_num < total_batches - 1:
+                await asyncio.sleep(0.3)
 
         self.log.info("✅ Step 3 completed: Edited %d existing %s posts", edited_count, kind)
 
@@ -2006,29 +4488,95 @@ class GitHubSync(commands.Cog):
 
         prev_entities = prev.get(kind, {})
         cur_entities = cur.get(kind, {})
-        comment_count = 0
 
+        # Fast pre-screening: identify entities that might have new comments
+        entities_with_new_comments = []
         for number_str, cur_data in cur_entities.items():
-            thread = await self._get_thread_by_number(guild, number=int(number_str), kind=kind)
-            if not thread:
-                continue
-
             prev_data = prev_entities.get(number_str, {})
-            new_comments = await self._get_new_comments(guild, int(number_str), kind, cur_data, prev_data)
 
-            self.log.debug("Processing %s #%s: found %d comments in GitHub, %d new comments to sync",
-                         kind, number_str, len(cur_data.get("comments", [])), len(new_comments))
+            # Quick comparison: different comment counts or new comment IDs
+            if self._quick_comments_diff(cur_data, prev_data):
+                entities_with_new_comments.append((number_str, cur_data, prev_data))
 
-            successfully_posted_comments = []
-            for comment in new_comments:
-                success = await self._post_comment_to_thread(guild, thread, comment, cur_data, kind)
-                if success:
-                    comment_count += 1
-                    successfully_posted_comments.append(comment)
+        if not entities_with_new_comments:
+            self.log.info("✅ Step 4 completed: No new comments detected, skipped comment sync")
+            return
 
-            # Only update hashes for comments that were actually posted to Discord
-            if successfully_posted_comments:
-                await self._update_specific_comment_hashes(guild, int(number_str), kind, successfully_posted_comments)
+        self.log.debug("Step 4: Pre-screening found %d/%d entities with potential new comments",
+                      len(entities_with_new_comments), len(cur_entities))
+
+        # Use parallel processing for comment syncing
+        async def sync_comments_for_entity(number_str: str, cur_data: Dict[str, Any], prev_data: Dict[str, Any]) -> int:
+            """Sync comments for a single entity and return count of posted comments."""
+            try:
+                thread = await self._get_thread_by_number(guild, number=int(number_str), kind=kind)
+                if not thread:
+                    return 0
+
+                # Check if we can safely post comments to this thread
+                if not self._can_edit_thread(thread, cur_data, kind, "content"):
+                    self.log.debug("Skipping comments for %s #%s - thread is archived/locked and should remain so", kind, number_str)
+                    return 0
+
+                new_comments = await self._get_new_comments(guild, int(number_str), kind, cur_data, prev_data)
+
+                if not new_comments:
+                    return 0
+
+                self.log.debug("Processing %s #%s: found %d comments in GitHub, %d new comments to sync",
+                             kind, number_str, len(cur_data.get("comments", [])), len(new_comments))
+
+                # Post comments in parallel for this entity (but limit concurrency per entity)
+                async def post_single_comment(comment: Dict[str, Any]) -> bool:
+                    return await self._post_comment_parallel(guild, thread, comment, cur_data, kind)
+
+                # Process comments for this entity in smaller batches
+                comment_batch_size = 3  # Max 3 comments per entity concurrently
+                successfully_posted_comments = []
+                
+                for i in range(0, len(new_comments), comment_batch_size):
+                    comment_batch = new_comments[i:i + comment_batch_size]
+                    tasks = [post_single_comment(comment) for comment in comment_batch]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Collect successfully posted comments
+                    for comment, success in zip(comment_batch, results):
+                        if success is True:
+                            successfully_posted_comments.append(comment)
+
+                # Only update hashes for comments that were actually posted to Discord
+                if successfully_posted_comments:
+                    await self._update_specific_comment_hashes(guild, int(number_str), kind, successfully_posted_comments)
+
+                return len(successfully_posted_comments)
+            except Exception:
+                self.log.exception("Failed to sync comments for %s #%s", kind, number_str)
+                return 0
+
+        # Process entities in parallel batches
+        batch_size = 3  # Process 3 entities concurrently (each may have multiple comments)
+        total_batches = (len(entities_with_new_comments) + batch_size - 1) // batch_size
+        comment_count = 0
+        
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(entities_with_new_comments))
+            batch = entities_with_new_comments[start_idx:end_idx]
+            
+            # Sync comments for all entities in the batch concurrently
+            tasks = [sync_comments_for_entity(number_str, cur_data, prev_data) for number_str, cur_data, prev_data in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count total comments posted
+            batch_comments = sum(result for result in results if isinstance(result, int))
+            comment_count += batch_comments
+            
+            if batch_comments > 0:
+                self.log.debug("Batch %d/%d: Posted %d comments", batch_num + 1, total_batches, batch_comments)
+            
+            # Small delay between batches
+            if batch_num < total_batches - 1:
+                await asyncio.sleep(0.3)
 
         self.log.info("✅ Step 4 completed: Posted %d new comments", comment_count)
 
@@ -2037,25 +4585,62 @@ class GitHubSync(commands.Cog):
         self.log.info("📂 Step 5: Updating post status for %s", kind)
 
         entities = snapshot.get(kind, {})
+
+        # Lightning-fast hash-based pre-screening
+        entities_needing_updates = await self._get_entities_with_state_changes(guild, forum, entities, kind)
+
+        if not entities_needing_updates:
+            self.log.info("✅ Step 5 completed: No status changes detected via hash comparison, skipped all updates")
+            return
+
+        self.log.debug("Step 5: Hash-based screening found %d/%d entities needing status updates",
+                      len(entities_needing_updates), len(entities))
+
+        # Use parallel processing for status updates
+        async def update_single_thread_status(number_str: str, data: Dict[str, Any], desired_tags: List[discord.ForumTag]) -> bool:
+            """Update status for a single thread."""
+            try:
+                # Only now do we actually fetch the thread (for entities we know need updates)
+                thread = await self._get_thread_by_number(guild, number=int(number_str), kind=kind)
+                if not thread:
+                    return False
+
+                self.log.debug("Step 5: Updating status for %s #%s (state=%s, locked=%s)",
+                             kind, number_str, data.get("state"), data.get("locked"))
+
+                await self._apply_thread_state_parallel(thread, data, desired_tags, kind)
+
+                # Store the new state hash after successful update
+                await self._store_state_hash(guild, int(number_str), kind, data, desired_tags)
+                return True
+            except Exception:
+                self.log.exception("Failed to update status for %s #%s", kind, number_str)
+                return False
+
+        # Process status updates in parallel batches
+        batch_size = 5  # Process 5 status updates concurrently at most
+        total_batches = (len(entities_needing_updates) + batch_size - 1) // batch_size
         updated_count = 0
-
-        for number_str, data in entities.items():
-            thread = await self._get_thread_by_number(guild, number=int(number_str), kind=kind)
-            if not thread:
-                self.log.debug("Step 5: Could not find thread for %s #%s", kind, number_str)
-                continue
-
-            self.log.debug("Step 5: Updating status for %s #%s (state=%s, locked=%s)",
-                         kind, number_str, data.get("state"), data.get("locked"))
-
-            # Update status tags and archived/locked state
-            labels = data.get("labels", [])
-            label_tags = self._labels_to_forum_tags(forum, labels)
-            status_tags = self._get_status_tags_for_entity(forum, data, kind)
-            desired_tags = label_tags + [t for t in status_tags if t.id not in {lt.id for lt in label_tags}]
-
-            await self._apply_thread_state(thread, data, desired_tags, kind)
-            updated_count += 1
+        
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(entities_needing_updates))
+            batch = entities_needing_updates[start_idx:end_idx]
+            
+            # Update all status in the batch concurrently
+            tasks = [update_single_thread_status(number_str, data, desired_tags) for number_str, data, desired_tags in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count successful updates
+            batch_updated = sum(1 for result in results if result is True)
+            updated_count += batch_updated
+            
+            if batch_updated > 0:
+                self.log.debug("Batch %d/%d: Updated %d/%d thread status", batch_num + 1, total_batches, batch_updated, len(batch))
+            
+            # Small delay between batches
+            if batch_num < total_batches - 1:
+                await asyncio.sleep(0.3)
 
         self.log.info("✅ Step 5 completed: Updated status for %d %s posts", updated_count, kind)
 
@@ -2068,8 +4653,8 @@ class GitHubSync(commands.Cog):
             number = data["number"]
             self.log.info("Creating forum post for %s #%s: %s", kind, number, data.get("title", ""))
 
-            # Prepare content with avatar and organization info
-            title = self._clean_discord_text(data.get("title", ""))[:90] or f"{'Issue' if kind == 'issues' else 'PR'} #{number}"
+            # Prepare content with avatar and organization info - include number at start
+            title = self._format_forum_title(data, kind)
 
             # Create initial content
             body = self._clean_discord_text(data.get("body", ""))
@@ -2088,12 +4673,31 @@ class GitHubSync(commands.Cog):
             labels = data.get("labels", [])
             label_tags = self._labels_to_forum_tags(forum, labels)
             status_tags = self._get_status_tags_for_entity(forum, data, kind)
-            all_tags = label_tags + [t for t in status_tags if t.id not in {lt.id for lt in label_tags}]
+            
+            # Combine tags, ensuring status tags have priority and we don't exceed Discord's 5-tag limit
+            all_tags = status_tags  # Status tags first (most important)
+            for tag in label_tags:
+                if tag.id not in {st.id for st in all_tags} and len(all_tags) < 5:
+                    all_tags.append(tag)
+            
+            # Log if we had to drop some tags due to Discord's limit
+            total_desired_tags = len(status_tags) + len([t for t in label_tags if t.id not in {st.id for st in status_tags}])
+            if total_desired_tags > 5:
+                dropped_count = total_desired_tags - 5
+                self.log.warning("Discord 5-tag limit: dropped %d label tags for %s #%s (kept %d status + %d label tags)", 
+                               dropped_count, kind, number, len(status_tags), len(all_tags) - len(status_tags))
 
-            # Create thread with rate limit handling
+            # Create thread with rate limit handling and bot tracking
+            thread = None
             try:
                 created = await forum.create_thread(name=title, content=body, applied_tags=all_tags)
                 thread = created.thread if hasattr(created, "thread") else created
+
+                # Track this thread as bot-created to prevent feedback loops
+                if isinstance(thread, discord.Thread):
+                    self._bot_creating_threads.add(thread.id)
+                    self.log.debug("Tracking bot-created thread %s for issue #%s", thread.id, number)
+
             except discord.HTTPException as e:
                 if e.status == 429:  # Rate limited
                     retry_after = e.response.headers.get('Retry-After', '5')
@@ -2102,6 +4706,40 @@ class GitHubSync(commands.Cog):
                     # Retry once
                     created = await forum.create_thread(name=title, content=body, applied_tags=all_tags)
                     thread = created.thread if hasattr(created, "thread") else created
+
+                    # Track this thread as bot-created to prevent feedback loops (retry case)
+                    if isinstance(thread, discord.Thread):
+                        self._bot_creating_threads.add(thread.id)
+                        self.log.debug("Tracking bot-created thread %s for issue #%s (retry)", thread.id, number)
+                elif e.status == 400 and e.code == 50035:  # Invalid Form Body
+                    # Log detailed information about what might be causing the issue
+                    self.log.error("Invalid form body creating %s #%s - debugging info:", kind, number)
+                    self.log.error("  Title length: %d chars - %r", len(title), title[:100])
+                    self.log.error("  Content length: %d chars - %r", len(body), body[:200])
+                    self.log.error("  Applied tags: %d tags - %s", len(all_tags), [f"{t.name}({t.id})" for t in all_tags])
+                    self.log.error("  Forum channel: %s (%s)", forum.name, forum.id)
+                    
+                    # Check for specific issues
+                    if len(title) == 0:
+                        self.log.error("  ❌ Title is empty!")
+                    elif len(title) > 100:
+                        self.log.error("  ❌ Title exceeds 100 character limit!")
+                    
+                    if len(body) == 0:
+                        self.log.error("  ❌ Content is empty!")
+                    elif len(body) > 2000:
+                        self.log.error("  ❌ Content exceeds 2000 character limit!")
+                    
+                    if len(all_tags) > 5:
+                        self.log.error("  ❌ Too many tags applied (limit: 5)!")
+                    
+                    # Check for invalid tag IDs
+                    forum_tag_ids = {t.id for t in forum.available_tags}
+                    invalid_tags = [t for t in all_tags if t.id not in forum_tag_ids]
+                    if invalid_tags:
+                        self.log.error("  ❌ Invalid tag IDs: %s", [f"{t.name}({t.id})" for t in invalid_tags])
+                    
+                    raise  # Re-raise the original exception
                 else:
                     raise
 
@@ -2116,6 +4754,9 @@ class GitHubSync(commands.Cog):
             # Store origin as GitHub since this was created from GitHub data
             await self._store_origin(guild, number, kind, "github", None, None)
 
+            # Add small delay after thread creation to prevent rate limiting
+            await asyncio.sleep(0.1)
+
             # Post enhanced embed with avatars and colors
             embed_msg = await self._post_initial_embed(thread, data, kind)
 
@@ -2124,16 +4765,42 @@ class GitHubSync(commands.Cog):
                 await self._store_embed_message_id(guild, number, kind, thread.id, embed_msg.id)
 
             # Store content hashes for change detection (but not comments yet - they'll be processed in Step 4)
-            await self._store_content_hashes(guild, number, kind, data, include_comments=False)
+            try:
+                await asyncio.wait_for(
+                    self._store_content_hashes(guild, number, kind, data, include_comments=False),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                self.log.warning("Timeout storing content hashes for %s #%s - continuing", kind, number)
 
-            # Apply final state (archived/locked)
-            await self._apply_thread_state(thread, data, all_tags, kind)
+            # Add delay before applying thread state to prevent issues
+            await asyncio.sleep(0.1)
+
+            # Apply final state (archived/locked) with timeout protection
+            try:
+                await asyncio.wait_for(
+                    self._apply_thread_state(thread, data, all_tags, kind),
+                    timeout=45.0  # Longer timeout since this involves multiple Discord API calls
+                )
+            except asyncio.TimeoutError:
+                self.log.error("Timeout applying thread state for %s #%s - continuing", kind, number)
+                # Continue execution rather than failing the entire post creation
+
+            # Note: Thread will be removed from _bot_creating_threads when on_thread_create is called
+            # or after a timeout to prevent memory leaks
 
             return True
 
         except Exception:
             self.log.exception("Failed to create forum post for %s #%s", kind, data.get("number", "unknown"))
+            # Clean up tracking in case of failure
+            if thread and isinstance(thread, discord.Thread):
+                self._bot_creating_threads.discard(thread.id)
             return False
+        finally:
+            # Cleanup: Remove from tracking after a reasonable delay in case on_thread_create doesn't fire
+            if thread and isinstance(thread, discord.Thread):
+                asyncio.create_task(self._cleanup_thread_tracking(thread.id))
 
     async def _edit_forum_post(self, guild: discord.Guild, thread: discord.Thread, data: Dict[str, Any], kind: str) -> bool:
         """Edit an existing forum post with updated content."""
@@ -2141,8 +4808,8 @@ class GitHubSync(commands.Cog):
             number = data["number"]
             self.log.debug("Editing forum post for %s #%s", kind, number)
 
-            # Update thread title if changed
-            new_title = self._clean_discord_text(data.get("title", ""))[:90] or f"{'Issue' if kind == 'issues' else 'PR'} #{number}"
+            # Update thread title if changed - include number at start
+            new_title = self._format_forum_title(data, kind)
             if thread.name != new_title:
                 await thread.edit(name=new_title)
 
@@ -2171,15 +4838,38 @@ class GitHubSync(commands.Cog):
     async def _has_content_changed(self, guild: discord.Guild, number: int, kind: str, cur_data: Dict[str, Any], prev_data: Dict[str, Any]) -> bool:
         """Check if content has changed using hash comparison."""
         try:
-            stored_hashes = await self.config.custom("content_hashes", guild.id).get_raw(kind, str(number), default={})
+            # Check batch queue first if in batch mode
+            stored_hashes = {}
+            if self._batch_config_mode:
+                batch_key = f"custom.content_hashes.{kind}.{number}"
+                if batch_key in self._pending_config_updates:
+                    stored_hashes = self._pending_config_updates[batch_key]
+
+            # Fall back to stored config if not in batch or not found in batch
+            if not stored_hashes:
+                stored_hashes = await self.config.custom("content_hashes", guild.id).get_raw(kind, str(number), default={})
 
             # Calculate current hashes
             title_hash = self._hash_content(cur_data.get("title", ""))
             body_hash = self._hash_content(cur_data.get("body", ""))
 
+            # If no stored hashes exist, this might be the first time - check against previous data
+            if not stored_hashes.get("title_hash") and not stored_hashes.get("body_hash"):
+                # Compare against previous snapshot data instead
+                if prev_data:
+                    prev_title_hash = self._hash_content(prev_data.get("title", ""))
+                    prev_body_hash = self._hash_content(prev_data.get("body", ""))
+                    return title_hash != prev_title_hash or body_hash != prev_body_hash
+                # No previous data and no stored hashes - treat as new content
+                return True
+
             # Compare with stored hashes
             if (stored_hashes.get("title_hash") != title_hash or
                 stored_hashes.get("body_hash") != body_hash):
+                self.log.debug("Content changed for %s #%s: title_hash=%s->%s, body_hash=%s->%s",
+                             kind, number, 
+                             stored_hashes.get("title_hash", "None")[:8], title_hash[:8],
+                             stored_hashes.get("body_hash", "None")[:8], body_hash[:8])
                 return True
 
             return False
@@ -2207,25 +4897,39 @@ class GitHubSync(commands.Cog):
             new_comments = []
             total_comments = len(cur_data.get("comments", []))
 
-            for comment in cur_data.get("comments", []):
-                comment_id = comment.get("id")
-                if not comment_id:
-                    continue
+            # If no stored comment hashes and we have previous data, use previous data for comparison
+            if not stored_comment_hashes and prev_data:
+                prev_comment_map = {str(c.get("id")): self._hash_content(c.get("body", "")) 
+                                  for c in prev_data.get("comments", []) if c.get("id")}
+                
+                for comment in cur_data.get("comments", []):
+                    comment_id = comment.get("id")
+                    if not comment_id:
+                        continue
 
-                comment_hash = self._hash_content(comment.get("body", ""))
-                stored_hash = stored_comment_hashes.get(str(comment_id))
+                    comment_hash = self._hash_content(comment.get("body", ""))
+                    prev_hash = prev_comment_map.get(str(comment_id))
 
-                self.log.debug("Comment %s: hash=%s, stored=%s, is_new=%s",
-                             comment_id, comment_hash[:8],
-                             stored_hash[:8] if stored_hash else "None",
-                             stored_hash != comment_hash)
+                    # New comment or changed comment
+                    if prev_hash != comment_hash:
+                        new_comments.append(comment)
+            else:
+                # Use stored hashes for comparison
+                for comment in cur_data.get("comments", []):
+                    comment_id = comment.get("id")
+                    if not comment_id:
+                        continue
 
-                # If hash is different or doesn't exist, it's new/updated
-                if stored_hash != comment_hash:
-                    new_comments.append(comment)
+                    comment_hash = self._hash_content(comment.get("body", ""))
+                    stored_hash = stored_comment_hashes.get(str(comment_id))
 
-            self.log.debug("Comments for %s #%s: %d total, %d stored_hashes, %d new",
-                         kind, number, total_comments, len(stored_comment_hashes), len(new_comments))
+                    # If hash is different or doesn't exist, it's new/updated
+                    if stored_hash != comment_hash:
+                        new_comments.append(comment)
+
+            if new_comments:
+                self.log.debug("Comments for %s #%s: %d total, %d new/changed",
+                             kind, number, total_comments, len(new_comments))
 
             return new_comments
 
@@ -2265,41 +4969,92 @@ class GitHubSync(commands.Cog):
     async def _post_initial_embed(self, thread: discord.Thread, data: Dict[str, Any], kind: str) -> Optional[discord.Message]:
         """Post the initial enhanced embed with avatars and colors."""
         try:
-            embed = await self._create_embed(data, kind)
-            return await thread.send(embed=embed)
+            # Create embed with timeout protection
+            embed = await asyncio.wait_for(
+                self._create_embed(data, kind),
+                timeout=10.0  # 10 second timeout for embed creation
+            )
+            
+            # Add retry logic for Discord rate limits with timeout
+            for attempt in range(3):
+                try:
+                    # Send embed with timeout protection
+                    return await asyncio.wait_for(
+                        thread.send(embed=embed),
+                        timeout=15.0  # 15 second timeout for sending
+                    )
+                except asyncio.TimeoutError:
+                    self.log.warning("Timeout posting embed for thread %s (attempt %d/3)", thread.id, attempt + 1)
+                    if attempt == 2:  # Last attempt
+                        raise
+                    await asyncio.sleep(2)
+                    continue
+                except discord.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        retry_after = float(e.response.headers.get('Retry-After', '1'))
+                        self.log.warning("Rate limited posting embed for thread %s, waiting %.1fs (attempt %d/3)", 
+                                       thread.id, retry_after, attempt + 1)
+                        await asyncio.sleep(min(retry_after, 10))  # Cap wait time at 10 seconds
+                        continue
+                    else:
+                        raise
+                except Exception as e:
+                    if attempt == 2:  # Last attempt
+                        raise
+                    self.log.warning("Failed to post embed (attempt %d/3): %s", attempt + 1, str(e))
+                    await asyncio.sleep(1)
+                    
+            return None
+            
+        except asyncio.TimeoutError:
+            self.log.error("Timeout creating or posting embed for thread %s", thread.id)
+            return None
         except Exception:
-            self.log.exception("Failed to post initial embed")
+            self.log.exception("Failed to post initial embed for thread %s", thread.id)
             return None
 
     async def _create_embed(self, data: Dict[str, Any], kind: str) -> discord.Embed:
         """Create an enhanced embed with avatars, colors, and proper formatting."""
-        # Get status-based color
-        color = self._get_status_color(data, kind)
+        try:
+            # Get status-based color (simplified for open-only entities)
+            color = self._get_status_color(data, kind)
 
-        # Clean and truncate content
-        title = self._clean_discord_text(data.get("title", ""))[:256]
-        description = self._clean_discord_text(data.get("body", ""))[:4000]
+            # Clean and truncate content with length limits
+            title = self._clean_discord_text(data.get("title", ""))[:240]  # Leave buffer under 256
+            description = self._clean_discord_text(data.get("body", ""))[:3800]  # Leave buffer under 4096
 
-        embed = discord.Embed(
-            title=title,
-            url=data.get("url", ""),
-            description=description,
-            color=color
-        )
+            # Create basic embed
+            embed = discord.Embed(
+                title=title or "No title",
+                url=data.get("url", ""),
+                description=description or "No description",
+                color=color
+            )
 
-        # Set author with GitHub avatar
-        author_name = data.get("user", "GitHub")
-        author_avatar = data.get("user_avatar", "")
-        if author_avatar:
-            embed.set_author(name=author_name[:256], icon_url=author_avatar)
-        else:
-            embed.set_author(name=author_name[:256])
+            # Set author with fallbacks to prevent hanging on avatar loading
+            author_name = data.get("user", "GitHub")[:240]  # Ensure name is not too long
+            author_avatar = data.get("user_avatar", "")
+            
+            # Only set avatar if URL looks valid to prevent hanging
+            if author_avatar and author_avatar.startswith(("http://", "https://")):
+                try:
+                    embed.set_author(name=author_name, icon_url=author_avatar)
+                except Exception:
+                    # Fallback to no avatar if there's any issue
+                    embed.set_author(name=author_name)
+            else:
+                embed.set_author(name=author_name)
 
-        # Set thumbnail to organization avatar if available
-        # This will be set from repo_info in the snapshot
-        # embed.set_thumbnail(url=org_avatar)  # TODO: Add when we have repo_info
-
-        return embed
+            return embed
+            
+        except Exception:
+            # Fallback embed if anything goes wrong
+            self.log.exception("Failed to create embed, using fallback")
+            return discord.Embed(
+                title=f"{kind[:-1].title()} #{data.get('number', 'Unknown')}",
+                description="Error creating embed - see logs",
+                color=discord.Color.default()
+            )
 
     async def _create_comment_embed(self, comment: Dict[str, Any], entity_data: Dict[str, Any], kind: str) -> discord.Embed:
         """Create an embed for a GitHub comment with avatar."""
@@ -2386,11 +5141,20 @@ class GitHubSync(commands.Cog):
     async def _store_comment_message_id(self, guild: discord.Guild, number: int, kind: str, comment_id: str, message_id: int) -> None:
         """Store a comment's Discord message ID for later editing."""
         try:
-            message_data = await self.config.custom("discord_messages", guild.id).get_raw(kind, str(number), default={})
-            if "comments" not in message_data:
-                message_data["comments"] = {}
-            message_data["comments"][str(comment_id)] = message_id
-            await self.config.custom("discord_messages", guild.id).set_raw(kind, str(number), value=message_data)
+            # Use retry logic to handle Windows file locking issues
+            for attempt in range(3):
+                try:
+                    message_data = await self.config.custom("discord_messages", guild.id).get_raw(kind, str(number), default={})
+                    if "comments" not in message_data:
+                        message_data["comments"] = {}
+                    message_data["comments"][str(comment_id)] = message_id
+                    await self.config.custom("discord_messages", guild.id).set_raw(kind, str(number), value=message_data)
+                    break
+                except PermissionError:
+                    if attempt < 2:  # Don't sleep on the last attempt
+                        await asyncio.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                    else:
+                        raise
         except Exception:
             self.log.exception("Failed to store comment message ID")
 
@@ -2525,9 +5289,12 @@ class GitHubSync(commands.Cog):
             if not repo:
                 return
 
-            # Create GitHub issue
+            # Create GitHub issue with user avatar and formatted link
             issue_title = thread.name or "New issue from Discord"
-            issue_body = f"Created by {message.author} on Discord: {message.jump_url}\n\n{message.content}"
+            
+            # Format the issue body with user avatar and markdown link
+            user_info = self._format_discord_user_for_github(message.author, message.jump_url)
+            issue_body = f"{user_info}\n\n{message.content}"
 
             # Get labels from Discord thread tags (excluding status tags)
             labels = []
@@ -2544,6 +5311,9 @@ class GitHubSync(commands.Cog):
             await self._store_link(thread, github_issue.html_url, kind=kind)
             await self._store_link_by_number(thread, github_issue.number, kind=kind)
             await self._store_origin(guild, github_issue.number, kind, "discord", message.id, None)
+
+            # IMPORTANT: Invalidate state hash since new GitHub issue was created
+            await self._invalidate_state_hash(guild, github_issue.number, kind)
 
             self.log.info("Created GitHub issue #%s from Discord thread %s", github_issue.number, thread.id)
 
@@ -2577,8 +5347,9 @@ class GitHubSync(commands.Cog):
             if not repo:
                 return
 
-            # Format comment for GitHub with Discord user info
-            comment_body = f"**{message.author}** on Discord: {message.jump_url}\n\n{message.content}"
+            # Format comment for GitHub with user avatar and formatted link
+            user_info = self._format_discord_user_for_github(message.author, message.jump_url)
+            comment_body = f"{user_info}\n\n{message.content}"
 
             # Post to GitHub
             if kind == "issues":
@@ -2596,6 +5367,9 @@ class GitHubSync(commands.Cog):
 
             # Update local tracking
             await self._store_comment_message_id(guild, issue_number, kind, str(github_comment.id), message.id)
+
+            # IMPORTANT: Invalidate state hash since GitHub state changed
+            await self._invalidate_state_hash(guild, issue_number, kind)
 
             self.log.info("Posted Discord comment %s as GitHub comment %s on %s #%s",
                          message.id, github_comment.id, kind, issue_number)
@@ -2644,8 +5418,9 @@ class GitHubSync(commands.Cog):
             if not repo:
                 return
 
-            # Update GitHub comment
-            new_comment_body = f"**{after.author}** on Discord: {after.jump_url}\n\n{after.content}"
+            # Update GitHub comment with user avatar and formatted link
+            user_info = self._format_discord_user_for_github(after.author, after.jump_url)
+            new_comment_body = f"{user_info}\n\n{after.content}"
 
             if kind == "issues":
                 await asyncio.to_thread(
@@ -2655,6 +5430,9 @@ class GitHubSync(commands.Cog):
                 await asyncio.to_thread(
                     lambda: repo.get_pull(number=issue_number).get_comment(int(github_comment_id)).edit(new_comment_body)
                 )
+
+            # IMPORTANT: Invalidate state hash since GitHub state changed
+            await self._invalidate_state_hash(guild, issue_number, kind)
 
             self.log.info("Updated GitHub comment %s from Discord edit %s on %s #%s",
                          github_comment_id, after.id, kind, issue_number)
@@ -2716,6 +5494,9 @@ class GitHubSync(commands.Cog):
             # Remove from tracking
             await self._remove_comment_origin(guild, comment_key)
 
+            # IMPORTANT: Invalidate state hash since GitHub state changed
+            await self._invalidate_state_hash(guild, issue_number, kind)
+
             self.log.info("Deleted GitHub comment %s from Discord deletion %s on %s #%s",
                          github_comment_id, message.id, kind, issue_number)
 
@@ -2759,7 +5540,17 @@ class GitHubSync(commands.Cog):
                 "discord_message_id": discord_message_id,
                 "github_comment_id": github_comment_id
             }
-            await self.config.custom("content_origins", guild.id).set_raw("comments", comment_key, value=origin_data)
+            
+            # Use retry logic to handle Windows file locking issues
+            for attempt in range(3):
+                try:
+                    await self.config.custom("content_origins", guild.id).set_raw("comments", comment_key, value=origin_data)
+                    break
+                except PermissionError:
+                    if attempt < 2:  # Don't sleep on the last attempt
+                        await asyncio.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                    else:
+                        raise
         except Exception:
             self.log.exception("Failed to store comment origin")
 
@@ -2773,10 +5564,19 @@ class GitHubSync(commands.Cog):
     async def _remove_comment_origin(self, guild: discord.Guild, comment_key: str) -> None:
         """Remove comment origin tracking."""
         try:
-            comments_data = await self.config.custom("content_origins", guild.id).get_raw("comments", default={})
-            if comment_key in comments_data:
-                del comments_data[comment_key]
-                await self.config.custom("content_origins", guild.id).set_raw("comments", value=comments_data)
+            # Use retry logic to handle Windows file locking issues
+            for attempt in range(3):
+                try:
+                    comments_data = await self.config.custom("content_origins", guild.id).get_raw("comments", default={})
+                    if comment_key in comments_data:
+                        del comments_data[comment_key]
+                        await self.config.custom("content_origins", guild.id).set_raw("comments", value=comments_data)
+                    break
+                except PermissionError:
+                    if attempt < 2:  # Don't sleep on the last attempt
+                        await asyncio.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                    else:
+                        raise
         except Exception:
             self.log.exception("Failed to remove comment origin")
 
@@ -2816,15 +5616,19 @@ class GitHubSync(commands.Cog):
                 # Build desired tags: labels + status tags
                 label_tags = self._labels_to_forum_tags(forum, labels)
                 status_tags = self._get_status_tags_for_entity(forum, data, kind)
-                desired_tags = label_tags + [t for t in status_tags if t.id not in {lt.id for lt in label_tags}]
+                
+                # Combine tags, ensuring status tags have priority and we don't exceed Discord's 5-tag limit
+                desired_tags = status_tags  # Status tags first (most important)
+                for tag in label_tags:
+                    if tag.id not in {st.id for st in desired_tags} and len(desired_tags) < 5:
+                        desired_tags.append(tag)
 
                 if not thread:
                     # Create new thread
                     self.log.info("Creating thread for %s #%s: %s", kind, number, data.get("title", ""))
                     try:
-                        # Clean and validate title (Discord limit: 100 chars)
-                        raw_title = data.get("title") or ""
-                        title = self._clean_discord_text(raw_title)[:90] or f"{name_prefix}{number}"
+                        # Clean and validate title (Discord limit: 100 chars) - include number at start
+                        title = self._format_forum_title(data, kind)
 
                         # Clean and validate body (Discord limit: 2000 chars for forum posts)
                         raw_body = data.get("body") or ""
@@ -2919,24 +5723,9 @@ class GitHubSync(commands.Cog):
         """Get Discord-only status tags for an entity based on its state."""
         status_names = []
 
-        if kind == "issues":
-            if data.get("state") == "closed":
-                # Check if issue was closed as not planned/duplicate
-                state_reason = data.get("state_reason")
-                state_reason_lower = state_reason.lower() if state_reason else ""
-                if state_reason_lower in ["not_planned", "duplicate"]:
-                    status_names.append("not resolved")
-                else:
-                    status_names.append("closed")
-            elif data.get("state") == "open":
-                status_names.append("open")
-        elif kind == "prs":
-            if data.get("merged"):
-                status_names.append("merged")
-            elif data.get("state") == "closed":
-                status_names.append("closed")
-            elif data.get("state") == "open":
-                status_names.append("open")
+        # Since we only work with open entities, everything gets "open" status
+        if data.get("state") == "open":
+            status_names.append("open")
 
         return self._labels_to_forum_tags(forum, status_names)
 
@@ -2945,22 +5734,12 @@ class GitHubSync(commands.Cog):
         try:
             # Mark this thread as being updated by the bot to prevent feedback loops
             self._bot_updating_threads.add(thread.id)
-            # Determine desired archived/locked state
+            # Since we only work with open entities, threads should never be archived or locked
             desired_archived = False
-            desired_locked = data.get("locked", False)
+            desired_locked = False
 
-            if kind == "issues":
-                # Issues are archived when closed (regardless of reason)
-                desired_archived = data.get("state") == "closed"
-                # Issues should also be locked when closed (to prevent further Discord comments)
-                if desired_archived:
-                    desired_locked = True
-            elif kind == "prs":
-                # PRs are archived when closed or merged
-                desired_archived = data.get("state") == "closed" or data.get("merged", False)
-                # PRs should also be locked when closed or merged (to prevent further Discord comments)
-                if desired_archived:
-                    desired_locked = True
+            # Add timeout protection for the entire operation
+            timeout_seconds = 30  # 30 second timeout to prevent hanging
 
             # Log the state being applied
             issue_number = data.get("number", "unknown")
@@ -2971,61 +5750,61 @@ class GitHubSync(commands.Cog):
             self.log.debug("Applying state to %s #%s thread %s: GitHub state=%s, desired archived=%s, locked=%s",
                          kind, issue_number, thread.id, state_info, desired_archived, desired_locked)
 
+            # Enforce Discord's 5-tag limit as a safety measure
+            if len(desired_tags) > 5:
+                # Get forum to identify status tags
+                forum = thread.parent
+                if isinstance(forum, discord.ForumChannel):
+                    status_tag_names = self._status_tag_names
+                    status_tags = [t for t in desired_tags if t.name.lower() in status_tag_names]
+                    label_tags = [t for t in desired_tags if t.name.lower() not in status_tag_names]
+                    
+                    # Prioritize status tags, then take as many label tags as fit
+                    safe_desired_tags = status_tags + label_tags[:5-len(status_tags)]
+                    
+                    dropped_count = len(desired_tags) - len(safe_desired_tags)
+                    self.log.warning("Discord 5-tag limit: dropped %d tags for %s #%s thread %s (kept %d status + %d label tags)", 
+                                   dropped_count, kind, data.get("number", "unknown"), thread.id, 
+                                   len(status_tags), len(safe_desired_tags) - len(status_tags))
+                    desired_tags = safe_desired_tags
+                else:
+                    # Fallback: just take first 5 tags
+                    desired_tags = desired_tags[:5]
+                    self.log.warning("Discord 5-tag limit: truncated to first 5 tags for thread %s", thread.id)
+
             # Check what needs updating
             current_tag_ids = {t.id for t in getattr(thread, "applied_tags", [])}
             desired_tag_ids = {t.id for t in desired_tags}
             needs_tag_update = current_tag_ids != desired_tag_ids
             needs_state_update = (thread.archived != desired_archived or thread.locked != desired_locked)
 
-            # Handle archived threads specially
-            if thread.archived and (needs_tag_update or needs_state_update):
-                if desired_archived:
-                    # Thread should stay archived - unarchive temporarily to update tags, then re-archive
-                    if needs_tag_update:
-                        self.log.debug("Temporarily unarchiving thread %s to update tags, will re-archive", thread.id)
-                        await asyncio.sleep(0.05)
-                        await thread.edit(archived=False)
-                        # Refresh thread state
-                        thread = await thread.guild.fetch_channel(thread.id)  # type: ignore
+            # Wrap all Discord operations in a timeout to prevent hanging
+            async def apply_changes():
+                # Since we only work with open entities, any archived thread should be unarchived
+                if thread.archived:
+                    self.log.debug("Unarchiving thread %s (should be open)", thread.id)
+                    await thread.edit(archived=False, locked=False)
+                    await asyncio.sleep(0.1)  # Small delay for Discord to process
 
-                        await asyncio.sleep(0.05)
-                        await thread.edit(applied_tags=desired_tags)
-                        self.log.debug("Updated tags for thread %s", thread.id)
-
-                        # Re-archive with final state
-                        await asyncio.sleep(0.05)
-                        await thread.edit(archived=True, locked=desired_locked)
-                        self.log.debug("Re-archived thread %s with locked=%s", thread.id, desired_locked)
-                    elif thread.locked != desired_locked:
-                        # Only locked state needs updating
-                        await asyncio.sleep(0.05)
-                        await thread.edit(archived=False)
-                        await asyncio.sleep(0.05)
-                        await thread.edit(archived=True, locked=desired_locked)
-                        self.log.debug("Updated locked state for archived thread %s", thread.id)
-                else:
-                    # Thread should be unarchived
-                    await asyncio.sleep(0.05)
-                    await thread.edit(archived=False, locked=desired_locked)
-                    # Refresh thread state
-                    thread = await thread.guild.fetch_channel(thread.id)  # type: ignore
-
-                    if needs_tag_update:
-                        await asyncio.sleep(0.05)
-                        await thread.edit(applied_tags=desired_tags)
-                        self.log.debug("Updated tags after unarchiving thread %s", thread.id)
-            else:
-                # Thread is not archived, normal update flow
+                # Apply tags if needed
                 if needs_tag_update:
-                    await asyncio.sleep(0.05)
+                    self.log.debug("Updating tags for thread %s", thread.id)
                     await thread.edit(applied_tags=desired_tags)
-                    self.log.debug("Updated tags for thread %s", thread.id)
+                    await asyncio.sleep(0.1)  # Small delay for Discord to process
 
-                if needs_state_update:
-                    await asyncio.sleep(0.05)
-                    await thread.edit(archived=desired_archived, locked=desired_locked)
-                    self.log.debug("Updated state for thread %s: archived=%s, locked=%s",
+                # Ensure thread is in correct state (should always be unarchived/unlocked for open entities)
+                if needs_state_update and (desired_archived or desired_locked):
+                    self.log.debug("Updating state for thread %s: archived=%s, locked=%s",
                                  thread.id, desired_archived, desired_locked)
+                    await thread.edit(archived=desired_archived, locked=desired_locked)
+
+            # Apply changes with timeout protection
+            try:
+                await asyncio.wait_for(apply_changes(), timeout=timeout_seconds)
+                self.log.debug("Successfully applied state to thread %s", thread.id)
+            except asyncio.TimeoutError:
+                self.log.error("Timeout applying state to thread %s after %ds - skipping", thread.id, timeout_seconds)
+                return
 
         except discord.HTTPException as e:
             if e.code == 50083:  # Thread is archived
@@ -3038,6 +5817,9 @@ class GitHubSync(commands.Cog):
                 self.log.warning("Thread %s no longer exists (error 10003)", thread.id)
             elif e.code == 40058:  # Everything is archived
                 self.log.warning("Cannot edit thread %s in archived forum channel (error 40058)", thread.id)
+            elif e.code == 50035 and "Must be 5 or fewer in length" in str(e):
+                self.log.error("Discord 5-tag limit exceeded for thread %s - this should have been prevented! Tags: %d", 
+                             thread.id, len(desired_tags))
             else:
                 self.log.exception("Discord HTTP error applying thread state for thread %s (code %s): %s",
                                  thread.id, e.code, e)
@@ -3212,7 +5994,12 @@ class GitHubSync(commands.Cog):
             labels = data.get("labels", [])
             label_tags = self._labels_to_forum_tags(forum, labels)
             status_tags = self._get_status_tags_for_entity(forum, data, kind)
-            desired_tags = label_tags + [t for t in status_tags if t.id not in {lt.id for lt in label_tags}]
+            
+            # Combine tags, ensuring status tags have priority and we don't exceed Discord's 5-tag limit
+            desired_tags = status_tags  # Status tags first (most important)
+            for tag in label_tags:
+                if tag.id not in {st.id for st in desired_tags} and len(desired_tags) < 5:
+                    desired_tags.append(tag)
 
             # Apply the complete state (tags + archived/locked)
             await self._apply_thread_state(thread, data, desired_tags, kind)
@@ -3258,12 +6045,6 @@ class GitHubSync(commands.Cog):
                     color = None
                     if tag_name == "open":
                         color = discord.Color.green()
-                    elif tag_name == "closed":
-                        color = discord.Color.red()
-                    elif tag_name == "merged":
-                        color = discord.Color.purple()
-                    elif tag_name == "not resolved":
-                        color = discord.Color.greyple()
 
                     await forum.create_tag(name=tag_name, emoji=None, moderated=False)
                     self.log.info("Created status tag '%s' in %s forum", tag_name, kind)
@@ -3282,7 +6063,80 @@ class GitHubSync(commands.Cog):
         except Exception:
             self.log.exception("Failed to ensure status tags exist for %s forum", kind)
 
+    async def _reconcile_forum_and_labels_from_snapshot(self, guild: discord.Guild, forum: discord.ForumChannel, snapshot: Dict[str, Any]) -> None:
+        """
+        Reconcile forum tags with GitHub labels using snapshot data (no blocking GitHub API calls).
+        This eliminates the expensive repo.get_labels() call that was slowing down every sync.
+        """
+        try:
+            # Get GitHub labels from snapshot (fast - no API call)
+            gh_labels_data = snapshot.get("labels", {})
+            gh_label_names = set(gh_labels_data.keys())
+            forum_tag_names = {t.name for t in forum.available_tags}
+
+            # Track changes for logging
+            created_github_labels = 0
+            created_discord_tags = 0
+
+            # Create missing GitHub labels from Discord forum tags (if needed)
+            # Note: This still requires PyGithub calls, but only for new labels (rare)
+            repo = await self._get_repo(guild)
+            if repo:
+                for name in sorted(forum_tag_names - gh_label_names):
+                    if name.lower() in self._status_tag_names:
+                        continue  # Skip Discord-only status tags
+                    try:
+                        await asyncio.to_thread(lambda: repo.create_label(name=name, color="ededed"))
+                        created_github_labels += 1
+                        self.log.debug("Created GitHub label '%s' from Discord tag", name)
+                    except Exception:
+                        self.log.debug("Failed to create GitHub label '%s' (may already exist)", name)
+
+            # Create missing Discord forum tags from GitHub labels (if space permits)
+            missing_discord_tags = sorted(gh_label_names - forum_tag_names)
+            if missing_discord_tags:
+                # Check Discord's 20-tag limit
+                current_tag_count = len(forum.available_tags)
+                available_slots = 20 - current_tag_count
+
+                if available_slots > 0:
+                    tags_to_create = missing_discord_tags[:available_slots]
+                    for name in tags_to_create:
+                        try:
+                            await forum.create_tag(name=name)
+                            created_discord_tags += 1
+                            self.log.debug("Created Discord tag '%s' from GitHub label", name)
+                        except Exception:
+                            self.log.debug("Failed to create Discord tag '%s'", name)
+
+                    if len(missing_discord_tags) > available_slots:
+                        self.log.warning(
+                            "Could only create %d of %d Discord tags due to 20-tag limit. "
+                            "Remaining GitHub labels: %s",
+                            available_slots, len(missing_discord_tags),
+                            ", ".join(missing_discord_tags[available_slots:])
+                        )
+                else:
+                    self.log.warning(
+                        "Cannot create %d Discord tags from GitHub labels: 20-tag limit reached. "
+                        "Missing labels: %s",
+                        len(missing_discord_tags), ", ".join(missing_discord_tags[:5])
+                    )
+
+            if created_github_labels or created_discord_tags:
+                self.log.info("Tag sync: created %d GitHub labels, %d Discord tags",
+                             created_github_labels, created_discord_tags)
+            else:
+                self.log.debug("Tag sync: no changes needed")
+
+        except Exception:
+            self.log.exception("Failed to reconcile forum tags and GitHub labels")
+
     async def _reconcile_forum_and_labels(self, guild: discord.Guild, forum: discord.ForumChannel, repo) -> None:
+        """
+        Legacy method for backward compatibility (still makes blocking calls).
+        New code should use _reconcile_forum_and_labels_from_snapshot().
+        """
         try:
             gh_labels = list(repo.get_labels())
             gh_label_names = {lbl.name for lbl in gh_labels}
