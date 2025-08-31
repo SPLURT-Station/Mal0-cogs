@@ -1048,12 +1048,15 @@ class SuggestBounties(commands.Cog):
 
     @commands.command(name="syncbounties")
     @commands.admin_or_permissions(manage_guild=True)
-    async def sync_bounties(self, ctx: commands.Context):
+    async def sync_bounties(self, ctx: commands.Context, limit: Optional[int] = None):
         """
         Manually sync existing bounties by checking bot reactions on suggestion posts.
 
         This command scans the suggestion channel for existing posts and checks if the bot
         has already reacted with ✅ (success) or ❌ (failed) to determine their status.
+
+        Optional:
+        - `limit` (default 500): number of recent messages to scan (max 2000)
         """
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
@@ -1071,7 +1074,8 @@ class SuggestBounties(commands.Cog):
             await ctx.send("❌ Suggestion channel not found.")
             return
 
-        await ctx.send(f"🔄 Scanning {channel.mention} for existing bounty posts...")
+        scan_limit = 500 if limit is None else max(1, min(int(limit), 2000))
+        await ctx.send(f"🔄 Scanning {channel.mention} for existing bounty posts (up to {scan_limit} messages)...")
 
         # Get existing tracked suggestions
         existing_suggestions = await self.config.custom("suggestions", ctx.guild.id).suggestions()
@@ -1083,11 +1087,11 @@ class SuggestBounties(commands.Cog):
         new_tracked_count = 0
 
         try:
-            # Fetch messages from the channel (limit to last 100 to avoid rate limits)
+            # Fetch messages from the channel
             if not isinstance(channel, discord.TextChannel):
                 await ctx.send("❌ Configured suggestion channel is not a text channel.")
                 return
-            async for message in channel.history(limit=100):
+            async for message in channel.history(limit=scan_limit):
                 # Check if this is a suggestion post
                 if not message.content.startswith("Suggestion #"):
                     continue
@@ -1099,9 +1103,7 @@ class SuggestBounties(commands.Cog):
                 if message_id_str in existing_message_ids:
                     continue
 
-                # Check if this is an approved suggestion
-                if not message.embeds or not message.embeds[0].title == "Approved Suggestion":
-                    continue
+                # Do not require a specific embed title; older posts may not match exactly
 
                 # Extract suggestion number
                 suggestion_match = re.search(r"#(\d+)", message.content)
@@ -1113,12 +1115,16 @@ class SuggestBounties(commands.Cog):
                 # Check bot reactions to determine status
                 bot_reactions = []
                 for reaction in message.reactions:
-                    if reaction.emoji in ["✅", "❌"]:
-                        # Check if the bot reacted with this emoji
-                        async for user in reaction.users():
-                            if user.id == self.bot.user.id:
+                    if str(reaction.emoji) in ["✅", "❌"]:
+                        try:
+                            async for user in reaction.users():
+                                if user.bot and user.id == self.bot.user.id:
+                                    bot_reactions.append(str(reaction.emoji))
+                                    break
+                        except Exception:
+                            # Fallback: if reaction count is 1 and message author is bot, assume ours
+                            if reaction.count >= 1 and message.author == self.bot.user:
                                 bot_reactions.append(str(reaction.emoji))
-                                break
 
                 # Determine status based on reactions
                 status = "unknown"
@@ -1133,6 +1139,15 @@ class SuggestBounties(commands.Cog):
                 else:
                     # No reaction, assume pending
                     status = "pending"
+                    # Also consider checking for a linked issue URL in the message or embed
+                    if message.embeds:
+                        try:
+                            em = message.embeds[0]
+                            # Look for a GitHub URL in embed description
+                            if em.description and "github.com" in em.description:
+                                status = "success"
+                        except Exception:
+                            pass
 
                 # Store the suggestion status
                 await self._store_suggestion_status(
