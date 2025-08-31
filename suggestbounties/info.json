@@ -3,8 +3,8 @@
         "YourNameHere"
     ],
     "name": "SuggestBounties",
-    "short": "Sync suggestions to GitHub as bounties and track their status.",
-    "description": "Links suggestions from ideaboard to GitHub issues as bounties, tracks their status, and updates messages when issues are closed.",
+    "short": "Sync suggestions to GitHub as bounties and track their status with retry capabilities.",
+    "description": "Links suggestions from ideaboard to GitHub issues as bounties, tracks their status, and provides retry commands for failed bounty creation. Includes comprehensive tracking and manual retry functionality.",
     "requirements": [
         "requests",
         "PyGithub"
@@ -13,8 +13,10 @@
         "github",
         "suggestions",
         "bounty",
-        "automation"
+        "automation",
+        "retry",
+        "tracking"
     ],
-    "install_msg": "This cog links suggestions to GitHub issues as bounties and tracks their completion.",
+    "install_msg": "This cog links suggestions to GitHub issues as bounties, tracks their completion, and provides retry commands for failed bounty creation.",
     "type": "COG"
 }
