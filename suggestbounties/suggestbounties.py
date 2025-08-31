@@ -3,9 +3,11 @@ import discord
 from typing import Optional, List, Dict, Any
 import re
 from github import Github, GithubException
-import yaml
+import yaml  # type: ignore
 import logging
 import io
+import json
+from datetime import datetime
 
 class TemplateConfigView(discord.ui.View):
     def __init__(self, schema, on_confirm, on_cancel, message=None, author_id: Optional[int] = None):
@@ -62,7 +64,7 @@ class SchemaModal(discord.ui.Modal):
         self.suggestion_number = suggestion_number
         self.issue_body = issue_body
         self.on_submit_callback = on_submit_callback
-        self.responses = {}
+        self.responses: Dict[str, str] = {}
         self.field_map = []  # (id, type, label, required, placeholder, description)
         self.info_texts = []
 
@@ -133,6 +135,11 @@ class SuggestBounties(commands.Cog):
             auto_suggestions_enabled=True, # Toggle for automatic suggestion processing
             reason_keyword=None, # Optional keyword to require in Reason field (case-insensitive)
         )
+        # Add storage for tracking suggestions and their GitHub issue status
+        self.config.init_custom("suggestions", 1)
+        self.config.register_custom("suggestions",
+            suggestions={}  # message_id -> {"suggestion_number": str, "github_issue_url": str, "created_at": str, "status": str}
+        )
         self.log = logging.getLogger(f"red.{__name__}")
         # Placeholder for any startup logic, such as loading cache or setting up background tasks
 
@@ -155,6 +162,107 @@ class SuggestBounties(commands.Cog):
 
         return result
 
+    async def _store_suggestion_status(self, guild_id: int, message_id: int, suggestion_number: str, github_issue_url: Optional[str] = None, status: str = "pending"):
+        """Store the status of a suggestion"""
+        async with self.config.custom("suggestions", guild_id).suggestions() as suggestions:
+            suggestions[str(message_id)] = {
+                "suggestion_number": suggestion_number,
+                "github_issue_url": github_issue_url,
+                "created_at": datetime.utcnow().isoformat(),
+                "status": status
+            }
+
+    async def _get_suggestion_status(self, guild_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        """Get the status of a suggestion"""
+        suggestions = await self.config.custom("suggestions", guild_id).suggestions()
+        return suggestions.get(str(message_id))
+
+    async def _create_github_issue(self, ctx: Optional[commands.Context], message: discord.Message, suggestion_text: str, reason_text: Optional[str], results_text: Optional[str], suggesting_user: str = "") -> Optional[str]:
+        """Create a GitHub issue for a suggestion and return the issue URL or None if failed"""
+        guild = ctx.guild if ctx else message.guild
+        if not guild:
+            return None
+
+        config = self.config.guild(guild)
+        repo_name = await config.github_repo()
+        token = await config.github_token()
+
+        if not repo_name or not token:
+            return None
+
+        schema_yaml = await config.github_schema()
+        schema = yaml.safe_load(schema_yaml) if schema_yaml else None
+        template = await config.github_template()
+
+        suggestion_name = message.content
+        m = re.search(r"#(\d+)", message.content)
+        suggestion_number = m.group(1) if m else ""
+        message_link = message.jump_url
+
+        # Compose issue body
+        issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
+        if reason_text:
+            issue_body += f"**Reason:**\n{reason_text}\n\n"
+        issue_body += f"**Results:**\n{results_text}\n"
+
+        try:
+            gh = Github(token)
+            repo = gh.get_repo(repo_name)
+
+            if schema and template:
+                # Parse the stored template responses
+                import ast
+                template_responses = ast.literal_eval(template)
+
+                # Build issue body from schema, using template responses and auto-filled values
+                body_md = ""
+                for item in schema.get("body", []):
+                    # Skip markdown sections - they're only for form display, not issue content
+                    if item.get("type") == "markdown":
+                        continue
+                    elif item.get("type") in ("textarea", "input"):
+                        field_id = item.get("id")
+                        label = item["attributes"].get("label", field_id)
+
+                        # Use template response if available, otherwise auto-fill
+                        if field_id in template_responses:
+                            value = template_responses[field_id]
+                            # Replace wildcards in the template response
+                            value = self._replace_wildcards(value, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
+                        elif field_id == "suggestion-link":
+                            value = message_link
+                        elif field_id == "about-bounty":
+                            value = issue_body
+                        else:
+                            value = ""
+
+                        # Only add the field if it has content
+                        if value.strip():
+                            body_md += f"### {label}\n\n{value}\n\n"
+
+                # Use template title if available, otherwise schema default, and replace wildcards
+                title = template_responses.get("title", schema.get("title", suggestion_name))
+                title = self._replace_wildcards(title, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
+                labels = schema.get("labels", [])
+
+                created_issue: Any = repo.create_issue(
+                    title=title,
+                    body=body_md,
+                    labels=labels
+                )
+                return created_issue.html_url
+            else:
+                # Fallback to simple format
+                created_issue = repo.create_issue(
+                    title=suggestion_name,
+                    body=f"{suggestion_name}\n\n{issue_body}\n\n[View Suggestion]({message_link})"
+                )
+                return created_issue.html_url
+
+        except Exception as e:
+            self.log.error(f"Failed to create GitHub issue: {e}")
+            return None
+
     @commands.group() # type: ignore
     @commands.admin_or_permissions(manage_guild=True)
     async def suggestbountyset(self, ctx: commands.Context):
@@ -162,6 +270,58 @@ class SuggestBounties(commands.Cog):
         Configuration commands for SuggestBounties.
         """
         pass
+
+    @commands.command(name="bountyhelp")
+    async def bounty_help(self, ctx: commands.Context):
+        """
+        Show help for all bounty-related commands.
+        """
+        embed = discord.Embed(
+            title="SuggestBounties Commands",
+            description="Commands for managing GitHub bounty creation from suggestions",
+            color=await ctx.embed_color()
+        )
+
+        # Configuration commands
+        embed.add_field(
+            name="🔧 Configuration",
+            value=(
+                "`suggestbountyset repo <owner/repo>` - Set GitHub repository\n"
+                "`suggestbountyset token <token>` - Set GitHub token\n"
+                "`suggestbountyset channel <#channel>` - Set suggestion channel\n"
+                "`suggestbountyset schema` - Upload GitHub issue template\n"
+                "`suggestbountyset show` - Show current configuration\n"
+                "`suggestbountyset reasonflag [keyword]` - Set/clear reason requirement\n"
+                "`suggestbountyset toggle` - Toggle auto-processing"
+            ),
+            inline=False
+        )
+
+        # Retry and status commands
+        embed.add_field(
+            name="🔄 Retry & Status",
+            value=(
+                "`retrybounty [number]` - Retry failed bounty creation\n"
+                "`retryallbounties` - Retry all failed bounties at once\n"
+                "`bountystatus [number]` - Check bounty creation status\n"
+                "`clearbountytracking [number]` - Clear tracking data\n"
+                "`syncbounties` - Sync existing bounties from channel reactions"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="📋 Usage Examples",
+            value=(
+                "`retrybounty` - List all failed suggestions\n"
+                "`retrybounty 123` - Retry suggestion #123\n"
+                "`bountystatus` - Show overview of all suggestions\n"
+                "`bountystatus 123` - Show status of suggestion #123"
+            ),
+            inline=False
+        )
+
+        await ctx.send(embed=embed)
 
     @suggestbountyset.command()
     async def repo(self, ctx: commands.Context, repo: str):
@@ -413,6 +573,674 @@ class SuggestBounties(commands.Cog):
         await ctx.send(f"Automatic suggestion processing is now {status}.")
         await ctx.tick()
 
+    @commands.command(name="retrybounty")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def retry_bounty(self, ctx: commands.Context, suggestion_number: Optional[int] = None):
+        """
+        Retry creating a GitHub bounty for a failed suggestion.
+
+        Usage:
+        - `[p]retrybounty` - List all failed suggestions that can be retried
+        - `[p]retrybounty <number>` - Retry creating a bounty for suggestion #<number>
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        config = self.config.guild(ctx.guild)
+        repo_name = await config.github_repo()
+        token = await config.github_token()
+
+        if not repo_name or not token:
+            await ctx.send("❌ GitHub repository or token not configured. Please configure them first.")
+            return
+
+        suggestions = await self.config.custom("suggestions", ctx.guild.id).suggestions()
+
+        if not suggestions:
+            await ctx.send("No suggestions have been tracked yet.")
+            return
+
+        if suggestion_number is None:
+            # List all failed suggestions
+            failed_suggestions = []
+            for msg_id, data in suggestions.items():
+                if not data.get("github_issue_url"):
+                    failed_suggestions.append((msg_id, data))
+
+            if not failed_suggestions:
+                await ctx.send("✅ All tracked suggestions have GitHub issues created successfully!")
+                return
+
+            embed = discord.Embed(
+                title="Failed Suggestions - Ready for Retry",
+                description="The following suggestions failed to create GitHub issues and can be retried:",
+                color=await ctx.embed_color()
+            )
+
+            for msg_id, data in failed_suggestions[:10]:  # Limit to 10 for display
+                embed.add_field(
+                    name=f"Suggestion #{data['suggestion_number']}",
+                    value=f"Status: {data['status']}\nMessage ID: {msg_id}",
+                    inline=True
+                )
+
+            if len(failed_suggestions) > 10:
+                embed.set_footer(text=f"And {len(failed_suggestions) - 10} more...")
+
+            embed.add_field(
+                name="How to Retry",
+                value=f"Use `{ctx.prefix}retrybounty <number>` to retry a specific suggestion",
+                inline=False
+            )
+
+            await ctx.send(embed=embed)
+            return
+
+        # Retry specific suggestion
+        suggestion_found = None
+        msg_id = None
+
+        for mid, data in suggestions.items():
+            if data.get("suggestion_number") == str(suggestion_number):
+                suggestion_found = data
+                msg_id = int(mid)
+                break
+
+        if not suggestion_found:
+            await ctx.send(f"❌ Suggestion #{suggestion_number} not found in tracked suggestions.")
+            return
+
+        if suggestion_found.get("github_issue_url"):
+            await ctx.send(f"✅ Suggestion #{suggestion_number} already has a GitHub issue: {suggestion_found['github_issue_url']}")
+            return
+
+        # Find the original message
+        suggestion_channel_id = await config.suggestion_channel()
+        if not suggestion_channel_id:
+            await ctx.send("❌ Suggestion channel not configured.")
+            return
+
+        try:
+            channel = ctx.guild.get_channel(suggestion_channel_id)
+            if not channel or not isinstance(channel, discord.TextChannel):
+                await ctx.send("❌ Suggestion channel not found.")
+                return
+
+            message = await channel.fetch_message(msg_id)
+        except discord.NotFound:
+            await ctx.send(f"❌ Original suggestion message not found (ID: {msg_id})")
+            return
+        except Exception as e:
+            await ctx.send(f"❌ Error fetching message: {e}")
+            return
+
+        # Parse the message to extract suggestion details
+        if not message.embeds:
+            await ctx.send("❌ Message doesn't contain an embed.")
+            return
+
+        embed = message.embeds[0]
+        if not embed.description:
+            await ctx.send("❌ Embed doesn't contain suggestion description.")
+            return
+
+        suggestion_text = embed.description.strip()
+
+        # Parse embed fields for Reason and Results
+        reason_text = None
+        results_text = None
+
+        for field in embed.fields:
+            if field.name == "Reason" and field.value:
+                reason_text = field.value.strip()
+            elif field.name == "Results" and field.value:
+                results_text = field.value.strip()
+
+        if not results_text:
+            await ctx.send("❌ Embed doesn't contain Results field.")
+            return
+
+        # Extract suggesting user from embed footer
+        suggesting_user = ""
+        if embed.footer and embed.footer.text:
+            footer_match = re.search(r"Suggested by (.+?) \(\d+\)", embed.footer.text)
+            if footer_match:
+                suggesting_user = footer_match.group(1)
+
+        # Check if reason keyword is required
+        reason_keyword = await config.reason_keyword()
+        if reason_keyword:
+            if not reason_text or reason_keyword.lower() not in reason_text.lower():
+                await ctx.send(f"❌ Suggestion requires '{reason_keyword}' in the Reason field.")
+                return
+
+        # Try to create the GitHub issue
+        await ctx.send(f"🔄 Attempting to create GitHub bounty for Suggestion #{suggestion_number}...")
+
+        issue_url = await self._create_github_issue(
+            ctx, message, suggestion_text, reason_text, results_text, suggesting_user
+        )
+
+        if issue_url:
+            # Update the suggestion status
+            await self._store_suggestion_status(
+                ctx.guild.id, msg_id, str(suggestion_number), issue_url, "success"
+            )
+
+            # Update the original message reaction
+            try:
+                await message.clear_reactions()
+                await message.add_reaction("✅")
+            except Exception:
+                pass
+
+            await ctx.send(f"✅ Successfully created GitHub bounty for Suggestion #{suggestion_number}!\n{issue_url}")
+        else:
+            # Update status to failed
+            await self._store_suggestion_status(
+                ctx.guild.id, msg_id, str(suggestion_number), None, "failed"
+            )
+            await ctx.send(f"❌ Failed to create GitHub bounty for Suggestion #{suggestion_number}. Check the logs for details.")
+
+    @commands.command(name="retryallbounties")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def retry_all_bounties(self, ctx: commands.Context):
+        """
+        Retry creating GitHub bounties for all failed suggestions.
+
+        This command will attempt to recreate GitHub issues for all suggestions that previously failed.
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        config = self.config.guild(ctx.guild)
+        repo_name = await config.github_repo()
+        token = await config.github_token()
+
+        if not repo_name or not token:
+            await ctx.send("❌ GitHub repository or token not configured. Please configure them first.")
+            return
+
+        suggestions = await self.config.custom("suggestions", ctx.guild.id).suggestions()
+
+        if not suggestions:
+            await ctx.send("No suggestions have been tracked yet.")
+            return
+
+        # Find all failed suggestions
+        failed_suggestions = []
+        for msg_id, data in suggestions.items():
+            if not data.get("github_issue_url"):
+                failed_suggestions.append((msg_id, data))
+
+        if not failed_suggestions:
+            await ctx.send("✅ All tracked suggestions have GitHub issues created successfully!")
+            return
+
+        await ctx.send(f"🔄 Attempting to retry {len(failed_suggestions)} failed suggestions...")
+
+        success_count = 0
+        failed_count = 0
+
+        for msg_id, data in failed_suggestions:
+            try:
+                suggestion_number = data['suggestion_number']
+                await ctx.send(f"🔄 Processing Suggestion #{suggestion_number}...")
+
+                # Find the original message
+                suggestion_channel_id = await config.suggestion_channel()
+                if not suggestion_channel_id:
+                    await ctx.send(f"❌ Suggestion channel not configured for Suggestion #{suggestion_number}")
+                    failed_count += 1
+                    continue
+
+                try:
+                    channel = ctx.guild.get_channel(suggestion_channel_id)
+                    if not channel or not isinstance(channel, discord.TextChannel):
+                        await ctx.send(f"❌ Suggestion channel not found for Suggestion #{suggestion_number}")
+                        failed_count += 1
+                        continue
+
+                    message = await channel.fetch_message(int(msg_id))
+                except discord.NotFound:
+                    await ctx.send(f"❌ Original suggestion message not found for Suggestion #{suggestion_number}")
+                    failed_count += 1
+                    continue
+                except Exception as e:
+                    await ctx.send(f"❌ Error fetching message for Suggestion #{suggestion_number}: {e}")
+                    failed_count += 1
+                    continue
+
+                # Parse the message to extract suggestion details
+                if not message.embeds:
+                    await ctx.send(f"❌ Message doesn't contain an embed for Suggestion #{suggestion_number}")
+                    failed_count += 1
+                    continue
+
+                embed = message.embeds[0]
+                if not embed.description:
+                    await ctx.send(f"❌ Embed doesn't contain suggestion description for Suggestion #{suggestion_number}")
+                    failed_count += 1
+                    continue
+
+                suggestion_text = embed.description.strip()
+
+                # Parse embed fields for Reason and Results
+                reason_text = None
+                results_text = None
+
+                for field in embed.fields:
+                    if field.name == "Reason" and field.value:
+                        reason_text = field.value.strip()
+                    elif field.name == "Results" and field.value:
+                        results_text = field.value.strip()
+
+                if not results_text:
+                    await ctx.send(f"❌ Embed doesn't contain Results field for Suggestion #{suggestion_number}")
+                    failed_count += 1
+                    continue
+
+                # Extract suggesting user from embed footer
+                suggesting_user = ""
+                if embed.footer and embed.footer.text:
+                    footer_match = re.search(r"Suggested by (.+?) \(\d+\)", embed.footer.text)
+                    if footer_match:
+                        suggesting_user = footer_match.group(1)
+
+                # Check if reason keyword is required
+                reason_keyword = await config.reason_keyword()
+                if reason_keyword:
+                    if not reason_text or reason_keyword.lower() not in reason_text.lower():
+                        await ctx.send(f"❌ Suggestion #{suggestion_number} requires '{reason_keyword}' in the Reason field.")
+                        failed_count += 1
+                        continue
+
+                # Try to create the GitHub issue
+                issue_url = await self._create_github_issue(
+                    ctx, message, suggestion_text, reason_text, results_text, suggesting_user
+                )
+
+                if issue_url:
+                    # Update the suggestion status
+                    await self._store_suggestion_status(
+                        ctx.guild.id, int(msg_id), suggestion_number, issue_url, "success"
+                    )
+
+                    # Update the original message reaction
+                    try:
+                        await message.clear_reactions()
+                        await message.add_reaction("✅")
+                    except Exception:
+                        pass
+
+                    await ctx.send(f"✅ Successfully created GitHub bounty for Suggestion #{suggestion_number}!")
+                    success_count += 1
+                else:
+                    # Update status to failed
+                    await self._store_suggestion_status(
+                        ctx.guild.id, int(msg_id), suggestion_number, None, "failed"
+                    )
+                    await ctx.send(f"❌ Failed to create GitHub bounty for Suggestion #{suggestion_number}")
+                    failed_count += 1
+
+            except Exception as e:
+                await ctx.send(f"❌ Error processing Suggestion #{data.get('suggestion_number', 'unknown')}: {e}")
+                failed_count += 1
+
+        # Final summary
+        embed = discord.Embed(
+            title="Bulk Retry Complete",
+            color=await ctx.embed_color()
+        )
+        embed.add_field(name="✅ Successful", value=str(success_count), inline=True)
+        embed.add_field(name="❌ Failed", value=str(failed_count), inline=True)
+        embed.add_field(name="Total Processed", value=str(len(failed_suggestions)), inline=True)
+
+        if failed_count > 0:
+            embed.add_field(
+                name="Note",
+                value="Failed suggestions can be retried individually using `retrybounty <number>`",
+                inline=False
+            )
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="bountystatus")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def bounty_status(self, ctx: commands.Context, suggestion_number: Optional[int] = None):
+        """
+        Check the status of suggestions and their GitHub bounty creation.
+
+        Usage:
+        - `[p]bountystatus` - Show overview of all tracked suggestions
+        - `[p]bountystatus <number>` - Show detailed status for suggestion #<number>
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        suggestions = await self.config.custom("suggestions", ctx.guild.id).suggestions()
+
+        if not suggestions:
+            await ctx.send("No suggestions have been tracked yet.")
+            return
+
+        if suggestion_number is None:
+            # Show overview
+            total = len(suggestions)
+            successful = sum(1 for data in suggestions.values() if data.get("github_issue_url"))
+            failed = total - successful
+
+            embed = discord.Embed(
+                title="Bounty Status Overview",
+                color=await ctx.embed_color()
+            )
+            embed.add_field(name="Total Tracked", value=str(total), inline=True)
+            embed.add_field(name="✅ Successful", value=str(successful), inline=True)
+            embed.add_field(name="❌ Failed", value=str(failed), inline=True)
+
+            if failed > 0:
+                embed.add_field(
+                    name="Retry Failed",
+                    value=f"Use `{ctx.prefix}retrybounty` to retry individual suggestions or `{ctx.prefix}retryallbounties` to retry all at once",
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+            return
+
+        # Show specific suggestion status
+        suggestion_found = None
+        for data in suggestions.values():
+            if data.get("suggestion_number") == str(suggestion_number):
+                suggestion_found = data
+                break
+
+        if not suggestion_found:
+            await ctx.send(f"❌ Suggestion #{suggestion_number} not found in tracked suggestions.")
+            return
+
+        embed = discord.Embed(
+            title=f"Bounty Status - Suggestion #{suggestion_number}",
+            color=await ctx.embed_color()
+        )
+
+        embed.add_field(name="Status", value=suggestion_found.get("status", "unknown"), inline=True)
+        embed.add_field(name="Created At", value=suggestion_found.get("created_at", "unknown"), inline=True)
+
+        if suggestion_found.get("github_issue_url"):
+            embed.add_field(name="GitHub Issue", value=suggestion_found["github_issue_url"], inline=False)
+            embed.colour = discord.Color.green()
+        else:
+            embed.add_field(name="GitHub Issue", value="❌ Not created", inline=False)
+            embed.colour = discord.Color.red()
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="clearbountytracking")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def clear_bounty_tracking(self, ctx: commands.Context, suggestion_number: Optional[int] = None):
+        """
+        Clear tracking data for suggestions.
+
+        Usage:
+        - `[p]clearbountytracking` - Clear all tracking data (use with caution!)
+        - `[p]clearbountytracking <number>` - Clear tracking data for a specific suggestion
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        if suggestion_number is None:
+            # Clear all tracking data
+            confirm_embed = discord.Embed(
+                title="⚠️ Clear All Bounty Tracking?",
+                description="This will remove tracking data for **ALL** suggestions. This action cannot be undone!",
+                color=discord.Color.red()
+            )
+            confirm_embed.add_field(
+                name="Confirmation Required",
+                value="Type `CONFIRM` to proceed with clearing all tracking data.",
+                inline=False
+            )
+
+            await ctx.send(embed=confirm_embed)
+
+            def check(m):
+                return m.author == ctx.author and m.channel == ctx.channel and m.content == "CONFIRM"
+
+            try:
+                await ctx.bot.wait_for("message", check=check, timeout=30)
+            except Exception:
+                await ctx.send("❌ Confirmation timed out. No data was cleared.")
+                return
+
+            # Clear all data
+            async with self.config.custom("suggestions", ctx.guild.id).suggestions() as suggestions:
+                suggestions.clear()
+
+            await ctx.send("✅ All bounty tracking data has been cleared.")
+            return
+
+        # Clear specific suggestion
+        suggestions = await self.config.custom("suggestions", ctx.guild.id).suggestions()
+
+        suggestion_found = None
+        msg_id = None
+
+        for mid, data in suggestions.items():
+            if data.get("suggestion_number") == str(suggestion_number):
+                suggestion_found = data
+                msg_id = mid
+                break
+
+        if not suggestion_found:
+            await ctx.send(f"❌ Suggestion #{suggestion_number} not found in tracking data.")
+            return
+
+        # Remove the specific suggestion
+        async with self.config.custom("suggestions", ctx.guild.id).suggestions() as suggestions:
+            suggestions.pop(msg_id, None)
+
+        await ctx.send(f"✅ Tracking data for Suggestion #{suggestion_number} has been cleared.")
+
+    @commands.command(name="syncbounties")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def sync_bounties(self, ctx: commands.Context):
+        """
+        Manually sync existing bounties by checking bot reactions on suggestion posts.
+
+        This command scans the suggestion channel for existing posts and checks if the bot
+        has already reacted with ✅ (success) or ❌ (failed) to determine their status.
+        """
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        config = self.config.guild(ctx.guild)
+        suggestion_channel_id = await config.suggestion_channel()
+
+        if not suggestion_channel_id:
+            await ctx.send("❌ Suggestion channel not configured. Please configure it first.")
+            return
+
+        channel = ctx.guild.get_channel(suggestion_channel_id)
+        if not channel:
+            await ctx.send("❌ Suggestion channel not found.")
+            return
+
+        await ctx.send(f"🔄 Scanning {channel.mention} for existing bounty posts...")
+
+        # Get existing tracked suggestions
+        existing_suggestions = await self.config.custom("suggestions", ctx.guild.id).suggestions()
+        existing_message_ids = set(existing_suggestions.keys())
+
+        # Scan channel for suggestion posts
+        scanned_count = 0
+        synced_count = 0
+        new_tracked_count = 0
+
+        try:
+            # Fetch messages from the channel (limit to last 100 to avoid rate limits)
+            if not isinstance(channel, discord.TextChannel):
+                await ctx.send("❌ Configured suggestion channel is not a text channel.")
+                return
+            async for message in channel.history(limit=100):
+                # Check if this is a suggestion post
+                if not message.content.startswith("Suggestion #"):
+                    continue
+
+                scanned_count += 1
+                message_id_str = str(message.id)
+
+                # Skip if already tracked
+                if message_id_str in existing_message_ids:
+                    continue
+
+                # Check if this is an approved suggestion
+                if not message.embeds or not message.embeds[0].title == "Approved Suggestion":
+                    continue
+
+                # Extract suggestion number
+                suggestion_match = re.search(r"#(\d+)", message.content)
+                if not suggestion_match:
+                    continue
+
+                suggestion_number = suggestion_match.group(1)
+
+                # Check bot reactions to determine status
+                bot_reactions = []
+                for reaction in message.reactions:
+                    if reaction.emoji in ["✅", "❌"]:
+                        # Check if the bot reacted with this emoji
+                        async for user in reaction.users():
+                            if user.id == self.bot.user.id:
+                                bot_reactions.append(str(reaction.emoji))
+                                break
+
+                # Determine status based on reactions
+                status = "unknown"
+                github_issue_url = None
+
+                if "✅" in bot_reactions:
+                    status = "success"
+                    # Try to find corresponding GitHub issue by searching the repository
+                    github_issue_url = await self._find_existing_github_issue(ctx, suggestion_number, message.content)
+                elif "❌" in bot_reactions:
+                    status = "failed"
+                else:
+                    # No reaction, assume pending
+                    status = "pending"
+
+                # Store the suggestion status
+                await self._store_suggestion_status(
+                    ctx.guild.id, message.id, suggestion_number, github_issue_url, status
+                )
+
+                new_tracked_count += 1
+
+                # Update progress every 10 messages
+                if new_tracked_count % 10 == 0:
+                    await ctx.send(f"🔄 Scanned {scanned_count} messages, tracked {new_tracked_count} new suggestions...")
+
+        except Exception as e:
+            await ctx.send(f"❌ Error during scanning: {e}")
+            return
+
+        # Final summary
+        embed = discord.Embed(
+            title="Bounty Sync Complete",
+            color=await ctx.embed_color()
+        )
+        embed.add_field(name="📊 Scan Results", value=f"Messages scanned: {scanned_count}", inline=True)
+        embed.add_field(name="🆕 Newly Tracked", value=str(new_tracked_count), inline=True)
+        embed.add_field(name="📈 Total Tracked", value=str(len(await self.config.custom("suggestions", ctx.guild.id).suggestions())), inline=True)
+
+        if new_tracked_count > 0:
+            embed.add_field(
+                name="✅ Next Steps",
+                value=f"Use `{ctx.prefix}bountystatus` to view all tracked suggestions or `{ctx.prefix}retrybounty` to retry failed ones",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="ℹ️ Note",
+                value="No new suggestions were found to track. All existing posts may already be tracked.",
+                inline=False
+            )
+
+        await ctx.send(embed=embed)
+
+    async def _find_existing_github_issue(self, ctx: commands.Context, suggestion_number: str, suggestion_title: str) -> Optional[str]:
+        """
+        Try to find an existing GitHub issue that corresponds to a suggestion.
+        This is a best-effort attempt to match suggestions with existing issues.
+        """
+        if not ctx.guild:
+            return None
+
+        config = self.config.guild(ctx.guild)
+        repo_name = await config.github_repo()
+        token = await config.github_token()
+
+        if not repo_name or not token:
+            return None
+
+        try:
+            gh = Github(token)
+            repo = gh.get_repo(repo_name)
+
+            # Search for issues that might match this suggestion
+            # Look for issues with similar titles or containing the suggestion number
+            search_queries = [
+                f"repo:{repo_name} {suggestion_title}",
+                f"repo:{repo_name} suggestion #{suggestion_number}",
+                f"repo:{repo_name} bounty #{suggestion_number}",
+                f"repo:{repo_name} {suggestion_number}"
+            ]
+
+            # Predeclare loop variable types for strict linters
+            gh_issue: Any
+            for query in search_queries:
+                try:
+                    issues = gh.search_issues(query=query, state="all")
+                    for gh_issue in issues[:5]:  # type: ignore[misc]
+                        # Check if this issue seems to match our suggestion
+                        if self._issue_matches_suggestion(gh_issue, suggestion_number, suggestion_title):  # type: ignore[type-arg]
+                            return gh_issue.html_url
+                except Exception:
+                    continue
+
+        except Exception as e:
+            self.log.error(f"Error searching for existing GitHub issue: {e}")
+
+        return None
+
+    def _issue_matches_suggestion(self, issue, suggestion_number: str, suggestion_title: str) -> bool:
+        """
+        Determine if a GitHub issue matches a Discord suggestion.
+        This uses heuristics to make a best guess match.
+        """
+        # Check if the issue title contains the suggestion number
+        if suggestion_number in issue.title:
+            return True
+
+        # Check if the issue body contains the suggestion number
+        if issue.body and suggestion_number in issue.body:
+            return True
+
+        # Check if the issue title is similar to the suggestion title
+        suggestion_words = set(suggestion_title.lower().split())
+        issue_words = set(issue.title.lower().split())
+
+        # If more than 50% of words match, consider it a match
+        if len(suggestion_words.intersection(issue_words)) / len(suggestion_words) > 0.5:
+            return True
+
+        return False
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild:
@@ -466,81 +1294,29 @@ class SuggestBounties(commands.Cog):
             if footer_match:
                 suggesting_user = footer_match.group(1)
 
-        # Compose issue body
-        issue_body = f"**Suggestion:**\n{suggestion_text}\n\n"
-        if reason_text:
-            issue_body += f"**Reason:**\n{reason_text}\n\n"
-        issue_body += f"**Results:**\n{results_text}\n"
-        repo_name = await config.github_repo()
-        token = await config.github_token()
-        schema_yaml = await config.github_schema()
-        schema = yaml.safe_load(schema_yaml) if schema_yaml else None
-        template = await config.github_template()
-        suggestion_name = message.content
-        suggestion_number = re.search(r"#(\d+)", message.content)
-        suggestion_number = suggestion_number.group(1) if suggestion_number else ""
-        message_link = message.jump_url
-        if schema and template:
-            try:
-                # Parse the stored template responses
-                import ast
-                template_responses = ast.literal_eval(template)
-            except Exception as e:
-                template_responses = {}
+        # Extract suggestion number
+        suggestion_number_match = re.search(r"#(\d+)", message.content)
+        suggestion_number = suggestion_number_match.group(1) if suggestion_number_match else ""
 
-            # Build issue body from schema, using template responses and auto-filled values
-            # Only include textarea and input fields, skip markdown sections
-            body_md = ""
-            for item in schema.get("body", []):
-                # Skip markdown sections - they're only for form display, not issue content
-                if item.get("type") == "markdown":
-                    continue
-                elif item.get("type") in ("textarea", "input"):
-                    field_id = item.get("id")
-                    label = item["attributes"].get("label", field_id)
+        # Store initial suggestion status
+        await self._store_suggestion_status(message.guild.id, message.id, suggestion_number, None, "pending")
 
-                    # Use template response if available, otherwise auto-fill
-                    if field_id in template_responses:
-                        value = template_responses[field_id]
-                        # Replace wildcards in the template response
-                        value = self._replace_wildcards(value, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
-                    elif field_id == "suggestion-link":
-                        value = message_link
-                    elif field_id == "about-bounty":
-                        value = issue_body
-                    else:
-                        value = ""
+        # Try to create GitHub issue
+        issue_url = await self._create_github_issue(
+            ctx=None, message=message, suggestion_text=suggestion_text, reason_text=reason_text, results_text=results_text, suggesting_user=suggesting_user
+        )
 
-                    # Only add the field if it has content
-                    if value.strip():
-                        body_md += f"### {label}\n\n{value}\n\n"
-
-            # Use template title if available, otherwise schema default, and replace wildcards
-            title = template_responses.get("title", schema.get("title", suggestion_name))
-            title = self._replace_wildcards(title, suggestion_name, suggestion_number, message_link, issue_body, suggesting_user)
-            labels = schema.get("labels", [])
-
-            try:
-                gh = Github(token)
-                repo = gh.get_repo(repo_name)
-                issue = repo.create_issue(
-                    title=title,
-                    body=body_md,
-                    labels=labels
-                )
-                await message.add_reaction("✅")
-                self.log.info(f"Successfully created GitHub issue {issue.html_url}")
-            except Exception as e:
-                await message.add_reaction("❌")
-            return
-        try:
-            gh = Github(token)
-            repo = gh.get_repo(repo_name)
-            issue = repo.create_issue(
-                title=suggestion_name,
-                body=f"{suggestion_name}\n\n{issue_body}\n\n[View Suggestion]({message_link})"
+        if issue_url:
+            # Update status to success
+            await self._store_suggestion_status(
+                message.guild.id, message.id, suggestion_number, issue_url, "success"
             )
             await message.add_reaction("✅")
-            self.log.info(f"Successfully created GitHub issue {issue.html_url}")
-        except Exception as e:
+            self.log.info(f"Successfully created GitHub issue {issue_url}")
+        else:
+            # Update status to failed
+            await self._store_suggestion_status(
+                message.guild.id, message.id, suggestion_number, None, "failed"
+            )
             await message.add_reaction("❌")
+            self.log.error(f"Failed to create GitHub issue for suggestion #{suggestion_number}")
