@@ -3,6 +3,7 @@ import json
 import asyncio
 import os
 import discord
+from typing import Optional, Dict, Any
 from discord.ext import tasks
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
@@ -35,7 +36,7 @@ class CkeyTools(commands.Cog):
         self.config = Config.get_conf(self, identifier=908039527271104514, force_registration=True)
         self.db_manager = DatabaseManager()
         # Per-guild config
-        default_guild = {
+        default_guild: Dict[str, Any] = {
             "ticket_channel": None,  # Channel ID for ticket panel
             "ticket_category": None, # Category ID for ticket channels
             "panel_message": None,   # Message ID for the panel embed
@@ -484,7 +485,7 @@ class CkeyTools(commands.Cog):
         try:
             from sqlalchemy import text
         except Exception:
-            text = None
+            text = None  # type: ignore
 
         conf = await self.config.guild(ctx.guild).all()
         host = conf.get("db_host")
@@ -494,7 +495,7 @@ class CkeyTools(commands.Cog):
         prefix = conf.get("mysql_prefix") or ""
 
         configured = all([host, port, user, conf.get("db_password"), db_name])
-        connected = self.db_manager.is_connected(ctx.guild.id)
+        connected = self.db_manager.is_connected(ctx.guild.id) if ctx.guild else False
 
         ok = False
         ping_ms = None
@@ -503,20 +504,21 @@ class CkeyTools(commands.Cog):
         if configured and connected:
             # Try a very small query to validate connection
             try:
-                engine = self.db_manager.engines.get(ctx.guild.id)
-                if engine and text is not None:
-                    start = time.perf_counter()
-                    async with engine.connect() as conn:
-                        await conn.execute(text("SELECT 1"))
-                    ping_ms = (time.perf_counter() - start) * 1000.0
-                    ok = True
-                else:
-                    # Fallback: use session open/close as a check
-                    start = time.perf_counter()
-                    async with self.db_manager.get_session(ctx.guild.id) as _:
-                        pass
-                    ping_ms = (time.perf_counter() - start) * 1000.0
-                    ok = True
+                if ctx.guild:
+                    engine = self.db_manager.engines.get(ctx.guild.id)
+                    if engine and text is not None:
+                        start = time.perf_counter()
+                        async with engine.connect() as conn:
+                            await conn.execute(text("SELECT 1"))
+                        ping_ms = (time.perf_counter() - start) * 1000.0
+                        ok = True
+                    else:
+                        # Fallback: use session open/close as a check
+                        start = time.perf_counter()
+                        async with self.db_manager.get_session(ctx.guild.id) as _:
+                            pass
+                        ping_ms = (time.perf_counter() - start) * 1000.0
+                        ok = True
             except Exception as e:
                 error_msg = str(e)
                 ok = False
@@ -1377,7 +1379,7 @@ class CkeyTools(commands.Cog):
 
 
     @verify_config.command(name="invalidateonleave")
-    async def toggle_invalidate_on_leave(self, ctx, enabled: bool = None):
+    async def toggle_invalidate_on_leave(self, ctx, enabled: Optional[bool] = None):
         """
         Toggle whether to invalidate user verification when they leave the server.
 
@@ -1397,7 +1399,7 @@ class CkeyTools(commands.Cog):
         await ctx.tick()
 
     @verify_config.command(name="verification")
-    async def toggle_verification(self, ctx, enabled: bool = None):
+    async def toggle_verification(self, ctx, enabled: Optional[bool] = None):
         """
         Toggle the entire verification system.
 
@@ -1417,7 +1419,7 @@ class CkeyTools(commands.Cog):
         await ctx.tick()
 
     @verify_config.command(name="autoverification")
-    async def toggle_autoverification(self, ctx, enabled: bool = None):
+    async def toggle_autoverification(self, ctx, enabled: Optional[bool] = None):
         """
         Toggle automatic verification functionality.
 
@@ -1437,7 +1439,7 @@ class CkeyTools(commands.Cog):
         await ctx.tick()
 
     @verify_config.command(name="autoverifyonjoin")
-    async def toggle_autoverify_on_join(self, ctx, enabled: bool = None):
+    async def toggle_autoverify_on_join(self, ctx, enabled: Optional[bool] = None):
         """
         Toggle automatic verification when users join the server.
 
@@ -1618,7 +1620,7 @@ class CkeyTools(commands.Cog):
             is_deverified = user.id in deverified_users
 
             if link:
-                embed.color = discord.Color.green()
+                embed.colour = discord.Color.green()
                 embed.add_field(name="Status", value="✅ Verified", inline=True)
                 embed.add_field(name="Ckey", value=f"`{link.ckey}`", inline=True)
                 embed.add_field(name="Linked Since", value=f"<t:{int(link.timestamp.timestamp())}:R>", inline=True)
@@ -1633,7 +1635,7 @@ class CkeyTools(commands.Cog):
                     inline=True
                 )
             else:
-                embed.color = discord.Color.red()
+                embed.colour = discord.Color.red()
                 embed.add_field(name="Status", value="❌ Not verified", inline=True)
 
                 # Check for open ticket
@@ -1787,7 +1789,7 @@ class CkeyTools(commands.Cog):
 
     @commands.command()
     @commands.guild_only()
-    async def deverify(self, ctx: commands.Context, user: discord.Member = None):
+    async def deverify(self, ctx: commands.Context, user: Optional[discord.Member] = None):
         """
         Deverify a user, removing their verification and preventing auto-verification.
 
@@ -1796,21 +1798,27 @@ class CkeyTools(commands.Cog):
         """
         # Determine target user
         target_user = user if user else ctx.author
+        if not isinstance(target_user, discord.Member):
+            await ctx.send("❌ Target user must be a guild member.")
+            return
 
         # Permission check: users can only deverify themselves, admins can deverify anyone
         if target_user != ctx.author:
-            if not (ctx.author.guild_permissions.kick_members or
+            if not isinstance(ctx.author, discord.Member) or not (ctx.author.guild_permissions.kick_members or
                    ctx.author.guild_permissions.administrator or
                    any(role.permissions.kick_members or role.permissions.administrator for role in ctx.author.roles)):
                 await ctx.send("❌ You don't have permission to deverify other users.")
                 return
 
         # Check if database is connected
-        if not self.db_manager.is_connected(ctx.guild.id):
+        if not ctx.guild or not self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("❌ Database is not connected.")
             return
 
         # Send confirmation view
+        if not isinstance(ctx.author, discord.Member):
+            await ctx.send("❌ This command must be used in a guild.")
+            return
         view = DeverifyConfirmView(self, ctx.author, target_user)
         if target_user == ctx.author:
             confirmation_msg = f"Are you sure you want to deverify yourself? This will:\n• Remove your current verification\n• Kick you from the server\n• Prevent auto-verification until you verify with a new ckey\n• Allow you to rejoin and verify with a different ckey"
@@ -2266,6 +2274,9 @@ class CkeyTools(commands.Cog):
         overwrites = await self._build_ticket_overwrites(guild, user)
         channel_name = f"verify-{user.name}"
         try:
+            if not guild:
+                await interaction.response.send_message("❌ Guild not found.", ephemeral=True)
+                return
             ticket_channel = await guild.create_text_channel(
                 name=channel_name,
                 category=category,
@@ -2273,6 +2284,11 @@ class CkeyTools(commands.Cog):
                 reason=f"Verification ticket for {user}"
             )
             await self.config.member(user).open_ticket.set(ticket_channel.id)
+            # Set channel topic with opener id for convenience (best-effort)
+            try:
+                await ticket_channel.edit(topic=f"Verification ticket • opener_id={user.id}")
+            except Exception:
+                pass
             # Attempt auto-verification
             auto_verified, ckey = await self.try_auto_verification(guild, user, channel=ticket_channel, dm=False)
             if auto_verified:
@@ -2331,7 +2347,7 @@ class CkeyTools(commands.Cog):
 
         # Check if user already has an open ticket
         open_ticket = await self.config.member(user).open_ticket()
-        if open_ticket:
+        if open_ticket and guild:
             channel = guild.get_channel(open_ticket)
             if channel:
                 await interaction.response.send_message(
@@ -2349,6 +2365,9 @@ class CkeyTools(commands.Cog):
             )
             return
 
+        if not guild:
+            await interaction.response.send_message("❌ Guild not found.", ephemeral=True)
+            return
         category = guild.get_channel(category_id)
         if not category:
             await interaction.response.send_message(
@@ -2367,7 +2386,113 @@ class CkeyTools(commands.Cog):
             return
 
         # Create verification ticket
+        if not isinstance(user, discord.Member):
+            await interaction.response.send_message("❌ User must be a guild member.", ephemeral=True)
+            return
+        if not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message("❌ Category must be a category channel.", ephemeral=True)
+            return
         await self.create_verification_ticket(interaction, user, category, ticket_embed_data)
+
+    @commands.hybrid_command(name="closeverification", description="Close this verification ticket")
+    @commands.guild_only()
+    async def close_verification(self, ctx: commands.Context, *, reason: Optional[str] = None):
+        """Close the current verification ticket (opener or staff roles)."""
+        guild = ctx.guild
+        channel = ctx.channel
+
+        # Must be a text channel in a guild
+        if not isinstance(channel, discord.TextChannel) or guild is None:
+            # Use ephemeral reply if slash-invoked
+            try:
+                interaction = getattr(ctx, "interaction", None)
+                if interaction and not interaction.response.is_done():
+                    await interaction.response.send_message("❌ This command must be used in a server text channel.", ephemeral=True)
+                else:
+                    await ctx.send("❌ This command must be used in a server text channel.")
+            except Exception:
+                pass
+            return
+
+        conf = await self.config.guild(guild).all()
+        staff_role_ids = set(conf.get("ticket_staff_roles", []))
+
+        # Determine opener via member.open_ticket mapping
+        opener_id = None
+        try:
+            # Fast path: if the command invoker's open_ticket points to this channel, they're the opener
+            if isinstance(ctx.author, discord.Member):
+                user_open = await self.config.member(ctx.author).open_ticket()
+                if user_open == channel.id:
+                    opener_id = ctx.author.id
+            # Otherwise, scan members with open_ticket pointing to this channel (bounded by channel members)
+            if opener_id is None:
+                for member in channel.members:
+                    try:
+                        user_open = await self.config.member(member).open_ticket()
+                        if user_open == channel.id:
+                            opener_id = member.id
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # Validate this is a verification ticket known to the system
+        if opener_id is None:
+            interaction = getattr(ctx, "interaction", None)
+            if interaction and not interaction.response.is_done():
+                await interaction.response.send_message("❌ This channel is not recognized as a verification ticket.", ephemeral=True)
+            else:
+                await ctx.send("❌ This channel is not recognized as a verification ticket.")
+            return
+
+        # Authorization: opener or staff role
+        author: discord.Member = ctx.author  # type: ignore
+        is_opener = isinstance(author, discord.Member) and author.id == opener_id
+        has_staff_role = isinstance(author, discord.Member) and any((r.id in staff_role_ids) for r in getattr(author, "roles", []))
+
+        if not (is_opener or has_staff_role):
+            interaction = getattr(ctx, "interaction", None)
+            if interaction and not interaction.response.is_done():
+                await interaction.response.send_message("❌ You must be the ticket opener or a staff member to close this ticket.", ephemeral=True)
+            else:
+                await ctx.send("❌ You must be the ticket opener or a staff member to close this ticket.")
+            return
+
+        # Acknowledge and close
+        try:
+            closing_msg = "Closing this verification ticket..."
+            interaction = getattr(ctx, "interaction", None)
+            if interaction and not interaction.response.is_done():
+                await interaction.response.send_message(closing_msg, ephemeral=is_opener and not has_staff_role)
+            else:
+                await ctx.send(closing_msg)
+        except Exception:
+            pass
+
+        # Cleanup mappings
+        try:
+            # Clear member's open_ticket
+            try:
+                if opener_id is not None:
+                    await self.config.member_from_ids(guild.id, opener_id).open_ticket.clear()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Delete the channel
+        try:
+            delete_reason = f"Ticket closed by {author}"
+            if reason:
+                delete_reason += f" • {reason}"
+            await channel.delete(reason=delete_reason)
+        except Exception as e:
+            try:
+                await ctx.send(f"❌ Failed to delete channel: {e}")
+            except Exception:
+                pass
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
@@ -2427,8 +2552,10 @@ class CkeyTools(commands.Cog):
                 # Still assign roles even if DM fails
                 role_ids = await self.config.guild(guild).verification_roles()
                 roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
+                valid_roles = [role for role in roles if role is not None]
                 try:
-                    await member.add_roles(*roles, reason="SS13 auto-verification successful")
+                    if valid_roles:
+                        await member.add_roles(*valid_roles, reason="SS13 auto-verification successful")
                 except Exception as role_e:
                     self.log.error(f"Failed to assign roles to {member} during auto-verification: {role_e}")
 
@@ -2553,6 +2680,9 @@ class CkeyTools(commands.Cog):
     @autoroles.command(name="update")
     async def autoroles_update_cmd(self, ctx: commands.Context):
         """Manually rebuild the autoroles TOML file."""
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
         await self.rebuild_autoroles_file(ctx.guild)
         await ctx.tick()
 
@@ -2596,7 +2726,7 @@ class CkeyTools(commands.Cog):
         await ctx.tick()
 
     @autoroles_config.command(name="toggle")
-    async def autoroles_toggle(self, ctx: commands.Context, *, on_or_off: str = None):
+    async def autoroles_toggle(self, ctx: commands.Context, *, on_or_off: Optional[str] = None):
         """Toggle automatic autoroles updates (periodic and on role change)."""
         current = await self.config.guild(ctx.guild).autoroles_enabled()
         if on_or_off is None:
@@ -2613,7 +2743,7 @@ class CkeyTools(commands.Cog):
     @autoroles_config.command(name="map")
     async def autoroles_map_role(self, ctx: commands.Context, role: discord.Role, *, toml_path: str):
         """Map a role to a TOML path (e.g., donator.tier_1)."""
-        if ctx.guild.get_role(role.id) is None:
+        if not ctx.guild or ctx.guild.get_role(role.id) is None:
             await ctx.send_help()
             return
         mappings = await self.config.guild(ctx.guild).autoroles_role_paths()
@@ -2631,7 +2761,8 @@ class CkeyTools(commands.Cog):
             del mappings[str(role.id)]
             await self.config.guild(ctx.guild).autoroles_role_paths.set(mappings)
             await ctx.send(f"Unmapped role {role.name} from autoroles configuration")
-            await self.rebuild_autoroles_file(ctx.guild)
+            if ctx.guild:
+                await self.rebuild_autoroles_file(ctx.guild)
         else:
             await ctx.send("This role is not mapped.")
 
@@ -2644,7 +2775,7 @@ class CkeyTools(commands.Cog):
             return
         lines = []
         for role_id_str, path in mappings.items():
-            role = ctx.guild.get_role(int(role_id_str))
+            role = ctx.guild.get_role(int(role_id_str)) if ctx.guild else None
             role_name = role.name if role else f"Unknown({role_id_str})"
             lines.append(f"- {role_name}: {path}")
         await ctx.send(chat_formatting.box("\n".join(lines), "yaml"))
@@ -2680,14 +2811,14 @@ class VerificationCodeView(discord.ui.View):
 
         # Check if this is a verification ticket by looking for open ticket in config
         open_ticket = await self.cog.config.member(user).open_ticket()
-        if not open_ticket or open_ticket != interaction.channel.id:
+        if not open_ticket or not interaction.channel or open_ticket != interaction.channel.id:
             await interaction.response.send_message("This doesn't appear to be your verification ticket.", ephemeral=True)
             return
 
         await interaction.response.send_modal(VerificationCodeModal(self.cog, user, guild, interaction.channel))
 
 class VerificationCodeModal(discord.ui.Modal, title="Enter Verification Code"):
-    code = ui.TextInput(label="Verification Code", style=discord.TextStyle.short, required=True, max_length=100)
+    code: ui.TextInput = ui.TextInput(label="Verification Code", style=discord.TextStyle.short, required=True, max_length=100)
 
     def __init__(self, cog, user, guild, ticket_channel):
         super().__init__()
@@ -2735,7 +2866,8 @@ class DeverifyConfirmView(discord.ui.View):
 
         # Disable all buttons
         for item in self.children:
-            item.disabled = True
+            if hasattr(item, 'disabled'):
+                item.disabled = True
         await interaction.response.edit_message(view=self)
 
         # Perform deverification
@@ -2755,11 +2887,13 @@ class DeverifyConfirmView(discord.ui.View):
 
         # Disable all buttons
         for item in self.children:
-            item.disabled = True
+            if hasattr(item, 'disabled'):
+                item.disabled = True
 
         await interaction.response.edit_message(content="❌ Deverification cancelled.", view=self)
 
     async def on_timeout(self):
         # Disable all buttons when the view times out
         for item in self.children:
-            item.disabled = True
+            if hasattr(item, 'disabled'):
+                item.disabled = True
