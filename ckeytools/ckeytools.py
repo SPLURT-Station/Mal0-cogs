@@ -14,6 +14,12 @@ from discord import ui
 from .helpers import normalise_to_ckey
 from .database import DatabaseManager
 import tomlkit
+import aiohttp
+try:
+    from dateutil import parser as date_parser
+except ImportError:
+    # Fallback if dateutil is not available
+    date_parser = None
 
 
 class CkeyTools(commands.Cog):
@@ -64,6 +70,11 @@ class CkeyTools(commands.Cog):
             "autoroles_config_folder": None,
             "autoroles_file_name": "donator.toml",
             "autoroles_role_paths": {},  # {role_id(str): "path.to.key"}
+            # agevet system
+            "agevet_enabled": False,  # Whether age vetting system is enabled
+            "agevet_api_url": None,  # BackgroundCheck API URL
+            "agevet_api_key": None,  # API key for BackgroundCheck
+            "agevet_role": None,  # Role ID to assign to age-vetted users
         }
         self.config.register_guild(**default_guild)
         # Per-user config (for future use, e.g. to track open tickets)
@@ -2585,6 +2596,209 @@ class CkeyTools(commands.Cog):
             current[leaf] = list(dict.fromkeys(values))
         return base
 
+    # =========================
+    # agevet HTTP client methods
+    # =========================
+
+    async def _get_agevet_headers(self, guild):
+        """Get headers for agevet API requests."""
+        api_key = await self.config.guild(guild).agevet_api_key()
+        if not api_key:
+            raise ValueError("AgeVet API key not configured")
+        return {"X-API-Key": api_key, "Content-Type": "application/json"}
+
+    async def _get_agevet_url(self, guild):
+        """Get the agevet API URL for the guild."""
+        api_url = await self.config.guild(guild).agevet_api_url()
+        if not api_url:
+            raise ValueError("AgeVet API URL not configured")
+        return api_url.rstrip("/") + "/api/agevet/"
+
+    async def _make_agevet_request(self, guild, method, data=None, params=None):
+        """Make an HTTP request to the agevet API."""
+        try:
+            url = await self._get_agevet_url(guild)
+            headers = await self._get_agevet_headers(guild)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    json=data,
+                    params=params
+                ) as response:
+                    response_data = await response.json()
+
+                    if response.status >= 400:
+                        error_msg = response_data.get('error', f'HTTP {response.status}')
+                        raise aiohttp.ClientError(f"API Error: {error_msg}")
+
+                    return response_data, response.status
+        except aiohttp.ClientError as e:
+            self.log.error(f"AgeVet API request failed: {e}")
+            raise
+        except Exception as e:
+            self.log.error(f"Unexpected error in agevet API request: {e}")
+            raise
+
+    async def get_agevet_record(self, guild, ckey):
+        """Get an agevet record by ckey."""
+        try:
+            data, status = await self._make_agevet_request(
+                guild, "GET", params={"ckey": ckey, "fields": "ckey,date_of_birth,created_at"}
+            )
+            return data
+        except aiohttp.ClientError as e:
+            if "Not found" in str(e):
+                return None
+            raise
+
+    async def create_agevet_record(self, guild, ckey, date_of_birth):
+        """Create a new agevet record."""
+        data = {
+            "ckey": ckey,
+            "date_of_birth": date_of_birth.isoformat()
+        }
+        try:
+            response_data, status = await self._make_agevet_request(guild, "POST", data=data)
+            return response_data
+        except aiohttp.ClientError as e:
+            if "already exists" in str(e).lower() or "unique constraint" in str(e).lower():
+                raise ValueError(f"AgeVet record for ckey '{ckey}' already exists")
+            raise
+
+    async def update_agevet_record(self, guild, ckey, date_of_birth):
+        """Update an existing agevet record."""
+        data = {
+            "ckey": ckey,
+            "date_of_birth": date_of_birth.isoformat()
+        }
+        try:
+            response_data, status = await self._make_agevet_request(guild, "PATCH", data=data)
+            return response_data
+        except aiohttp.ClientError as e:
+            if "Not found" in str(e):
+                raise ValueError(f"AgeVet record for ckey '{ckey}' not found")
+            raise
+
+    async def delete_agevet_record(self, guild, ckey):
+        """Delete an agevet record."""
+        data = {"ckey": ckey}
+        try:
+            response_data, status = await self._make_agevet_request(guild, "DELETE", data=data)
+            return response_data
+        except aiohttp.ClientError as e:
+            if "Not found" in str(e):
+                raise ValueError(f"AgeVet record for ckey '{ckey}' not found")
+            raise
+
+    def _parse_date_of_birth(self, date_string: str) -> datetime.date:
+        """Parse a date string into a date object with flexible format support."""
+        if not date_string or not date_string.strip():
+            raise ValueError("Date of birth cannot be empty")
+
+        date_string = date_string.strip()
+
+        # Try common formats first
+        common_formats = [
+            "%Y-%m-%d",      # 2000-01-01
+            "%m/%d/%Y",      # 01/01/2000
+            "%d/%m/%Y",      # 01/01/2000 (European)
+            "%Y/%m/%d",      # 2000/01/01
+            "%m-%d-%Y",      # 01-01-2000
+            "%d-%m-%Y",      # 01-01-2000 (European)
+            "%B %d, %Y",     # January 1, 2000
+            "%b %d, %Y",     # Jan 1, 2000
+            "%d %B %Y",      # 1 January 2000
+            "%d %b %Y",      # 1 Jan 2000
+        ]
+
+        for fmt in common_formats:
+            try:
+                parsed_date = datetime.datetime.strptime(date_string, fmt).date()
+                # Validate the date is reasonable (not in the future, not too old)
+                today = datetime.date.today()
+                if parsed_date > today:
+                    raise ValueError("Date of birth cannot be in the future")
+                if parsed_date < today - datetime.timedelta(days=365*150):  # 150 years ago
+                    raise ValueError("Date of birth seems unreasonably old")
+                return parsed_date
+            except ValueError:
+                continue
+
+        # If common formats fail, try dateutil parser as fallback
+        if date_parser is not None:
+            try:
+                parsed_date = date_parser.parse(date_string, fuzzy=False).date()
+                # Validate the date is reasonable
+                today = datetime.date.today()
+                if parsed_date > today:
+                    raise ValueError("Date of birth cannot be in the future")
+                if parsed_date < today - datetime.timedelta(days=365*150):  # 150 years ago
+                    raise ValueError("Date of birth seems unreasonably old")
+                return parsed_date
+            except Exception:
+                pass  # Fall through to final error
+
+        raise ValueError(f"Could not parse date '{date_string}'. Please use formats like YYYY-MM-DD, MM/DD/YYYY, or 'January 1, 2000'")
+
+    async def _assign_agevet_role(self, guild, user):
+        """Assign the agevet role to a user if configured."""
+        try:
+            agevet_role_id = await self.config.guild(guild).agevet_role()
+            if not agevet_role_id:
+                return False  # No role configured
+
+            role = guild.get_role(agevet_role_id)
+            if not role:
+                self.log.warning(f"AgeVet role with ID {agevet_role_id} not found in guild {guild.name}")
+                return False
+
+            member = guild.get_member(user.id)
+            if not member:
+                self.log.warning(f"User {user} not found in guild {guild.name}")
+                return False
+
+            if role not in member.roles:
+                await member.add_roles(role, reason="Age verification completed")
+                self.log.info(f"Assigned agevet role {role.name} to {member} in {guild.name}")
+                return True
+            else:
+                self.log.debug(f"User {member} already has agevet role {role.name}")
+                return True
+        except Exception as e:
+            self.log.error(f"Error assigning agevet role to {user} in {guild.name}: {e}")
+            return False
+
+    async def _remove_agevet_role(self, guild, user):
+        """Remove the agevet role from a user if configured."""
+        try:
+            agevet_role_id = await self.config.guild(guild).agevet_role()
+            if not agevet_role_id:
+                return False  # No role configured
+
+            role = guild.get_role(agevet_role_id)
+            if not role:
+                self.log.warning(f"AgeVet role with ID {agevet_role_id} not found in guild {guild.name}")
+                return False
+
+            member = guild.get_member(user.id)
+            if not member:
+                self.log.warning(f"User {user} not found in guild {guild.name}")
+                return False
+
+            if role in member.roles:
+                await member.remove_roles(role, reason="Age verification removed")
+                self.log.info(f"Removed agevet role {role.name} from {member} in {guild.name}")
+                return True
+            else:
+                self.log.debug(f"User {member} does not have agevet role {role.name}")
+                return True
+        except Exception as e:
+            self.log.error(f"Error removing agevet role from {user} in {guild.name}: {e}")
+            return False
+
     async def _collect_ckeys_for_role(self, guild: discord.Guild, role: discord.Role) -> list:
         """Collect latest ckeys for all members having the role using the guild DB."""
         if role is None:
@@ -2779,6 +2993,344 @@ class CkeyTools(commands.Cog):
             role_name = role.name if role else f"Unknown({role_id_str})"
             lines.append(f"- {role_name}: {path}")
         await ctx.send(chat_formatting.box("\n".join(lines), "yaml"))
+
+    # =========================
+    # agevet commands
+    # =========================
+
+    @ckeytools.group(name="agevet")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def agevet(self, ctx: commands.Context):
+        """Age verification system for Discord users linked to SS13 ckeys."""
+        pass
+
+    @agevet.command(name="vet")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def agevet_vet(self, ctx: commands.Context, user: discord.Member, *, date_of_birth: str):
+        """
+        Age verify a Discord user with their date of birth.
+
+        This command will:
+        1. Get the user's linked ckey from the database
+        2. Create or update their age verification record
+        3. Assign the agevet role if configured
+
+        Date formats supported:
+        - YYYY-MM-DD (2000-01-01)
+        - MM/DD/YYYY (01/01/2000)
+        - DD/MM/YYYY (01/01/2000)
+        - January 1, 2000
+        - And many other common formats
+
+        Examples:
+        `[p]ckeytools agevet vet @user 2000-01-01`
+        `[p]ckeytools agevet vet @user 01/01/2000`
+        `[p]ckeytools agevet vet @user "January 1, 2000"`
+        """
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        # Check if agevet system is enabled
+        agevet_enabled = await self.config.guild(ctx.guild).agevet_enabled()
+        if not agevet_enabled:
+            await ctx.send("❌ Age verification system is not enabled. Use `[p]ckeytools agevet config enable` to enable it.")
+            return
+
+        # Check if database is connected
+        if not self.db_manager.is_connected(ctx.guild.id):
+            await ctx.send("❌ Database is not connected. Please configure the database connection first.")
+            return
+
+        # Check if API is configured
+        try:
+            await self._get_agevet_headers(ctx.guild)
+            await self._get_agevet_url(ctx.guild)
+        except ValueError as e:
+            await ctx.send(f"❌ Age verification API not configured: {e}")
+            return
+
+        async with ctx.typing():
+            try:
+                # Get user's ckey from database
+                link = await self.db_manager.get_valid_link_by_discord_id(ctx.guild.id, user.id)
+                if not link:
+                    await ctx.send(f"❌ User {user.mention} is not verified with a ckey. They must verify their Discord account first.")
+                    return
+
+                ckey = link.ckey
+                self.log.info(f"Age vetting user {user} ({user.id}) with ckey {ckey}")
+
+                # Parse date of birth
+                try:
+                    dob = self._parse_date_of_birth(date_of_birth)
+                except ValueError as e:
+                    await ctx.send(f"❌ Invalid date format: {e}")
+                    return
+
+                # Check if user is already age vetted
+                existing_record = await self.get_agevet_record(ctx.guild, ckey)
+
+                if existing_record:
+                    # Update existing record
+                    await self.update_agevet_record(ctx.guild, ckey, dob)
+                    action = "updated"
+                    self.log.info(f"Updated age vetting record for {user} ({ckey}) with DOB {dob}")
+                else:
+                    # Create new record
+                    await self.create_agevet_record(ctx.guild, ckey, dob)
+                    action = "created"
+                    self.log.info(f"Created age vetting record for {user} ({ckey}) with DOB {dob}")
+
+                # Assign agevet role
+                role_assigned = await self._assign_agevet_role(ctx.guild, user)
+
+                # Send success message
+                embed = discord.Embed(
+                    title="Age Verification Successful",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(name="User", value=f"{user.mention} ({user.display_name})", inline=True)
+                embed.add_field(name="Ckey", value=f"`{ckey}`", inline=True)
+                embed.add_field(name="Date of Birth", value=dob.strftime("%B %d, %Y"), inline=True)
+                embed.add_field(name="Record", value=f"✅ {action.title()}", inline=True)
+                embed.add_field(name="Role", value="✅ Assigned" if role_assigned else "❌ Not configured", inline=True)
+
+                embed.set_thumbnail(url=user.display_avatar.url)
+                embed.set_footer(text=f"Age verification {action} by {ctx.author.display_name}")
+
+                await ctx.send(embed=embed)
+                await ctx.tick()
+
+            except ValueError as e:
+                await ctx.send(f"❌ {e}")
+            except Exception as e:
+                self.log.error(f"Error during age vetting of {user}: {e}")
+                await ctx.send(f"❌ An error occurred during age verification: {e}")
+
+    @agevet.group(name="config")
+    @checks.admin_or_permissions(administrator=True)
+    async def agevet_config(self, ctx: commands.Context):
+        """Configure the age verification system."""
+        pass
+
+    @agevet_config.command(name="enable")
+    async def agevet_config_enable(self, ctx: commands.Context, enabled: Optional[bool] = None):
+        """Enable or disable the age verification system."""
+        if enabled is None:
+            current = await self.config.guild(ctx.guild).agevet_enabled()
+            await ctx.send(f"Age verification system is currently **{'enabled' if current else 'disabled'}**.")
+            return
+
+        await self.config.guild(ctx.guild).agevet_enabled.set(enabled)
+        if enabled:
+            await ctx.send("✅ Age verification system has been enabled.")
+        else:
+            await ctx.send("✅ Age verification system has been disabled.")
+        await ctx.tick()
+
+    @agevet_config.command(name="apiurl")
+    async def agevet_config_api_url(self, ctx: commands.Context, *, api_url: str):
+        """Set the BackgroundCheck API URL."""
+        # Basic validation
+        if not api_url.startswith(('http://', 'https://')):
+            await ctx.send("❌ API URL must start with http:// or https://")
+            return
+
+        await self.config.guild(ctx.guild).agevet_api_url.set(api_url.rstrip('/'))
+        await ctx.send(f"✅ AgeVet API URL set to `{api_url.rstrip('/')}`")
+        await ctx.tick()
+
+    @agevet_config.command(name="apikey")
+    async def agevet_config_api_key(self, ctx: commands.Context, *, api_key: str):
+        """Set the BackgroundCheck API key."""
+        if not api_key.strip():
+            await ctx.send("❌ API key cannot be empty")
+            return
+
+        await self.config.guild(ctx.guild).agevet_api_key.set(api_key.strip())
+        await ctx.send("✅ AgeVet API key set.")
+        await ctx.tick()
+
+    @agevet_config.command(name="role")
+    async def agevet_config_role(self, ctx: commands.Context, role: Optional[discord.Role] = None):
+        """Set the role to assign to age-verified users."""
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        if role is None:
+            current_role_id = await self.config.guild(ctx.guild).agevet_role()
+            if current_role_id:
+                current_role = ctx.guild.get_role(current_role_id)
+                if current_role:
+                    await ctx.send(f"Current agevet role: {current_role.mention}")
+                else:
+                    await ctx.send("❌ Configured agevet role not found. It may have been deleted.")
+            else:
+                await ctx.send("❌ No agevet role configured.")
+            return
+
+        await self.config.guild(ctx.guild).agevet_role.set(role.id)
+        await ctx.send(f"✅ AgeVet role set to {role.mention}")
+        await ctx.tick()
+
+    @agevet_config.command(name="status")
+    async def agevet_config_status(self, ctx: commands.Context):
+        """Show the current age verification configuration status."""
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+
+        # Check configuration
+        enabled = conf["agevet_enabled"]
+        api_url = conf["agevet_api_url"]
+        api_key = conf["agevet_api_key"]
+        role_id = conf["agevet_role"]
+
+        # Check API connectivity
+        api_configured = bool(api_url and api_key)
+        api_connected = False
+        if api_configured:
+            try:
+                await self._get_agevet_headers(ctx.guild)
+                await self._get_agevet_url(ctx.guild)
+                api_connected = True
+            except Exception:
+                pass
+
+        # Get role info
+        role = ctx.guild.get_role(role_id) if role_id else None
+
+        embed = discord.Embed(
+            title="Age Verification Configuration Status",
+            color=await ctx.embed_color(),
+            timestamp=discord.utils.utcnow()
+        )
+
+        embed.add_field(
+            name="🔧 System Status",
+            value="✅ Enabled" if enabled else "❌ Disabled",
+            inline=True
+        )
+
+        embed.add_field(
+            name="🌐 API Configuration",
+            value="✅ Configured" if api_configured else "❌ Not configured",
+            inline=True
+        )
+
+        embed.add_field(
+            name="🔗 API Connection",
+            value="✅ Connected" if api_connected else "❌ Failed",
+            inline=True
+        )
+
+        embed.add_field(
+            name="🎭 AgeVet Role",
+            value=role.mention if role else "❌ Not set",
+            inline=True
+        )
+
+        embed.add_field(
+            name="🗄️ Database",
+            value="✅ Connected" if self.db_manager.is_connected(ctx.guild.id) else "❌ Not connected",
+            inline=True
+        )
+
+        if api_url:
+            embed.add_field(
+                name="🔗 API URL",
+                value=f"`{api_url}`",
+                inline=False
+            )
+
+        await ctx.send(embed=embed)
+
+    @agevet.command(name="check")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def agevet_check(self, ctx: commands.Context, user: discord.Member):
+        """Check the age verification status of a user."""
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        # Check if agevet system is enabled
+        agevet_enabled = await self.config.guild(ctx.guild).agevet_enabled()
+        if not agevet_enabled:
+            await ctx.send("❌ Age verification system is not enabled.")
+            return
+
+        # Check if database is connected
+        if not self.db_manager.is_connected(ctx.guild.id):
+            await ctx.send("❌ Database is not connected.")
+            return
+
+        async with ctx.typing():
+            try:
+                # Get user's ckey from database
+                link = await self.db_manager.get_valid_link_by_discord_id(ctx.guild.id, user.id)
+                if not link:
+                    await ctx.send(f"❌ User {user.mention} is not verified with a ckey.")
+                    return
+
+                ckey = link.ckey
+
+                # Check age vetting status
+                try:
+                    record = await self.get_agevet_record(ctx.guild, ckey)
+                except Exception as e:
+                    await ctx.send(f"❌ Error checking age verification status: {e}")
+                    return
+
+                # Check role status
+                agevet_role_id = await self.config.guild(ctx.guild).agevet_role()
+                has_role = False
+                if agevet_role_id:
+                    role = ctx.guild.get_role(agevet_role_id)
+                    if role and role in user.roles:
+                        has_role = True
+
+                embed = discord.Embed(
+                    title=f"Age Verification Status: {user.display_name}",
+                    color=discord.Color.green() if record else discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+
+                embed.add_field(name="User", value=f"{user.mention} ({user.display_name})", inline=True)
+                embed.add_field(name="Ckey", value=f"`{ckey}`", inline=True)
+
+                if record:
+                    dob = datetime.datetime.fromisoformat(record['date_of_birth']).date()
+                    created_at = datetime.datetime.fromisoformat(record['created_at'].replace('Z', '+00:00'))
+
+                    embed.add_field(name="Date of Birth", value=dob.strftime("%B %d, %Y"), inline=True)
+                    embed.add_field(name="Age", value=f"{self._calculate_age(dob)} years old", inline=True)
+                    embed.add_field(name="Vetted Since", value=f"<t:{int(created_at.timestamp())}:R>", inline=True)
+                else:
+                    embed.add_field(name="Status", value="❌ Not age verified", inline=True)
+
+                embed.add_field(
+                    name="AgeVet Role",
+                    value="✅ Has role" if has_role else "❌ No role" if agevet_role_id else "❌ Not configured",
+                    inline=True
+                )
+
+                embed.set_thumbnail(url=user.display_avatar.url)
+
+                await ctx.send(embed=embed)
+
+            except Exception as e:
+                self.log.error(f"Error checking age verification status for {user}: {e}")
+                await ctx.send(f"❌ An error occurred while checking age verification status: {e}")
+
+    def _calculate_age(self, birth_date: datetime.date) -> int:
+        """Calculate age from birth date."""
+        today = datetime.date.today()
+        return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
 
 class VerificationButtonView(discord.ui.View):
     """View for the verification button."""
