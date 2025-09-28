@@ -3479,9 +3479,32 @@ class CkeyTools(commands.Cog):
                 file_bytes = await attachment.read()
                 file_text = file_bytes.decode('utf-8')
 
-                # Parse CSV
-                csv_reader = csv.DictReader(io.StringIO(file_text))
-                records = list(csv_reader)
+                # Parse CSV with proper handling of newlines and quotes
+                try:
+                    csv_reader = csv.DictReader(io.StringIO(file_text))
+                    records = list(csv_reader)
+                except csv.Error as e:
+                    # If CSV parsing fails, try with different dialect settings
+                    try:
+                        # Try with different quoting and escapechar settings
+                        csv_reader = csv.DictReader(
+                            io.StringIO(file_text),
+                            quoting=csv.QUOTE_ALL,
+                            escapechar='\\'
+                        )
+                        records = list(csv_reader)
+                    except csv.Error:
+                        # Try with minimal settings
+                        csv_reader = csv.DictReader(
+                            io.StringIO(file_text),
+                            quoting=csv.QUOTE_NONE,
+                            escapechar='\\'
+                        )
+                        records = list(csv_reader)
+
+                # If all parsing attempts failed, raise the original error
+                if 'records' not in locals():
+                    raise csv.Error(f"Failed to parse CSV file: {e}")
 
                 if not records:
                     await ctx.send("❌ CSV file is empty or has no valid records.")
@@ -3593,6 +3616,13 @@ class CkeyTools(commands.Cog):
                 # Log summary
                 self.log.info(f"CSV age verification load completed: {processed} processed, {created} created, {updated} updated, {discord_users_updated} Discord users updated, {errors} errors")
 
+            except csv.Error as e:
+                self.log.error(f"CSV parsing error: {e}")
+                await ctx.send(f"❌ CSV parsing error: {e}\n\n**Tips for fixing CSV files:**\n"
+                             "• Ensure all fields with newlines are properly quoted\n"
+                             "• Use consistent quote characters (single or double quotes)\n"
+                             "• Avoid unescaped quotes within quoted fields\n"
+                             "• Make sure the file is saved as UTF-8 encoding")
             except Exception as e:
                 self.log.error(f"Error loading CSV age verification data: {e}")
                 await ctx.send(f"❌ An error occurred while loading CSV data: {e}")
