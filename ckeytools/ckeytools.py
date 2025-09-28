@@ -3327,6 +3327,91 @@ class CkeyTools(commands.Cog):
                 self.log.error(f"Error checking age verification status for {user}: {e}")
                 await ctx.send(f"❌ An error occurred while checking age verification status: {e}")
 
+    @agevet.command(name="unvet")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def agevet_unvet(self, ctx: commands.Context, user: discord.Member):
+        """
+        Remove age verification from a Discord user.
+
+        This command will:
+        1. Get the user's linked ckey from the database
+        2. Delete their age verification record from the BackgroundCheck API
+        3. Remove the agevet role if they have it
+
+        Examples:
+        `[p]ckeytools agevet unvet @user`
+        """
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        # Check if agevet system is enabled
+        agevet_enabled = await self.config.guild(ctx.guild).agevet_enabled()
+        if not agevet_enabled:
+            await ctx.send("❌ Age verification system is not enabled. Use `[p]ckeytools agevet config enable` to enable it.")
+            return
+
+        # Check if database is connected
+        if not self.db_manager.is_connected(ctx.guild.id):
+            await ctx.send("❌ Database is not connected. Please configure the database connection first.")
+            return
+
+        # Check if API is configured
+        try:
+            await self._get_agevet_headers(ctx.guild)
+            await self._get_agevet_url(ctx.guild)
+        except ValueError as e:
+            await ctx.send(f"❌ Age verification API not configured: {e}")
+            return
+
+        async with ctx.typing():
+            try:
+                # Get user's ckey from database
+                link = await self.db_manager.get_valid_link_by_discord_id(ctx.guild.id, user.id)
+                if not link:
+                    await ctx.send(f"❌ User {user.mention} is not verified with a ckey. They must verify their Discord account first.")
+                    return
+
+                ckey = link.ckey
+                self.log.info(f"Removing age verification from user {user} ({user.id}) with ckey {ckey}")
+
+                # Check if user is age vetted
+                existing_record = await self.get_agevet_record(ctx.guild, ckey)
+
+                if not existing_record:
+                    await ctx.send(f"❌ User {user.mention} is not age verified.")
+                    return
+
+                # Delete the age vetting record
+                await self.delete_agevet_record(ctx.guild, ckey)
+                self.log.info(f"Deleted age vetting record for {user} ({ckey})")
+
+                # Remove agevet role
+                role_removed = await self._remove_agevet_role(ctx.guild, user)
+
+                # Send success message
+                embed = discord.Embed(
+                    title="Age Verification Removed",
+                    color=discord.Color.orange(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(name="User", value=f"{user.mention} ({user.display_name})", inline=True)
+                embed.add_field(name="Ckey", value=f"`{ckey}`", inline=True)
+                embed.add_field(name="Record", value="✅ Deleted", inline=True)
+                embed.add_field(name="Role", value="✅ Removed" if role_removed else "❌ Not configured", inline=True)
+
+                embed.set_thumbnail(url=user.display_avatar.url)
+                embed.set_footer(text=f"Age verification removed by {ctx.author.display_name}")
+
+                await ctx.send(embed=embed)
+                await ctx.tick()
+
+            except ValueError as e:
+                await ctx.send(f"❌ {e}")
+            except Exception as e:
+                self.log.error(f"Error during age unvetting of {user}: {e}")
+                await ctx.send(f"❌ An error occurred during age verification removal: {e}")
+
     def _calculate_age(self, birth_date: datetime.date) -> int:
         """Calculate age from birth date."""
         today = datetime.date.today()
