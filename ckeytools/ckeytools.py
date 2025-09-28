@@ -15,6 +15,8 @@ from .helpers import normalise_to_ckey
 from .database import DatabaseManager
 import tomlkit
 import aiohttp
+import csv
+import io
 try:
     from dateutil import parser as date_parser
 except ImportError:
@@ -3411,6 +3413,189 @@ class CkeyTools(commands.Cog):
             except Exception as e:
                 self.log.error(f"Error during age unvetting of {user}: {e}")
                 await ctx.send(f"❌ An error occurred during age verification removal: {e}")
+
+    @agevet.command(name="loadcsv")
+    @checks.admin_or_permissions(administrator=True)
+    async def agevet_load_csv(self, ctx: commands.Context):
+        """
+        Load age verification data from a CSV file attachment.
+
+        The CSV file should have the following format:
+        - First column: ckey (SS13 ckey)
+        - Second column: date_of_birth (in any supported date format)
+
+        Example CSV content:
+        ```
+        ckey,date_of_birth
+        john_doe,2000-01-01
+        jane_smith,1995-05-15
+        bob_wilson,1998-12-25
+        ```
+
+        This command will:
+        1. Parse the CSV file
+        2. Create age verification records in the BackgroundCheck API
+        3. Find Discord users linked to those ckeys
+        4. Assign the agevet role to verified users
+
+        Use: `[p]ckeytools agevet loadcsv` (attach CSV file to the message)
+        """
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        # Check if agevet system is enabled
+        agevet_enabled = await self.config.guild(ctx.guild).agevet_enabled()
+        if not agevet_enabled:
+            await ctx.send("❌ Age verification system is not enabled. Use `[p]ckeytools agevet config enable` to enable it.")
+            return
+
+        # Check if database is connected
+        if not self.db_manager.is_connected(ctx.guild.id):
+            await ctx.send("❌ Database is not connected. Please configure the database connection first.")
+            return
+
+        # Check if API is configured
+        try:
+            await self._get_agevet_headers(ctx.guild)
+            await self._get_agevet_url(ctx.guild)
+        except ValueError as e:
+            await ctx.send(f"❌ Age verification API not configured: {e}")
+            return
+
+        # Check for CSV file attachment
+        if not ctx.message.attachments:
+            await ctx.send("❌ Please attach a CSV file to this command message.")
+            return
+
+        attachment = ctx.message.attachments[0]
+        if not attachment.filename.lower().endswith('.csv'):
+            await ctx.send("❌ The attached file must be a CSV file.")
+            return
+
+        async with ctx.typing():
+            try:
+                # Download and parse CSV file
+                file_bytes = await attachment.read()
+                file_text = file_bytes.decode('utf-8')
+
+                # Parse CSV
+                csv_reader = csv.DictReader(io.StringIO(file_text))
+                records = list(csv_reader)
+
+                if not records:
+                    await ctx.send("❌ CSV file is empty or has no valid records.")
+                    return
+
+                # Validate CSV format
+                if 'ckey' not in records[0] or 'date_of_birth' not in records[0]:
+                    await ctx.send("❌ CSV file must have 'ckey' and 'date_of_birth' columns.")
+                    return
+
+                self.log.info(f"Loading {len(records)} age verification records from CSV file")
+
+                # Process records
+                processed = 0
+                created = 0
+                updated = 0
+                errors = 0
+                discord_users_updated = 0
+                error_details = []
+
+                for i, record in enumerate(records, 1):
+                    try:
+                        ckey = record['ckey'].strip()
+                        dob_str = record['date_of_birth'].strip()
+
+                        if not ckey or not dob_str:
+                            error_details.append(f"Row {i}: Empty ckey or date_of_birth")
+                            errors += 1
+                            continue
+
+                        # Normalize ckey
+                        ckey = normalise_to_ckey(ckey)
+
+                        # Parse date of birth
+                        try:
+                            dob = self._parse_date_of_birth(dob_str)
+                        except ValueError as e:
+                            error_details.append(f"Row {i} (ckey: {ckey}): Invalid date format - {e}")
+                            errors += 1
+                            continue
+
+                        # Check if record already exists
+                        existing_record = await self.get_agevet_record(ctx.guild, ckey)
+
+                        if existing_record:
+                            # Update existing record
+                            await self.update_agevet_record(ctx.guild, ckey, dob)
+                            updated += 1
+                            self.log.debug(f"Updated age vetting record for ckey {ckey}")
+                        else:
+                            # Create new record
+                            await self.create_agevet_record(ctx.guild, ckey, dob)
+                            created += 1
+                            self.log.debug(f"Created age vetting record for ckey {ckey}")
+
+                        # Find Discord users with this ckey and assign role
+                        try:
+                            # Get all links for this ckey
+                            all_links = await self.db_manager.get_all_links_by_ckey(ctx.guild.id, ckey)
+
+                            for link in all_links:
+                                if link.valid and link.discord_id:
+                                    # Find the Discord user
+                                    discord_user = ctx.guild.get_member(link.discord_id)
+                                    if discord_user:
+                                        # Assign agevet role
+                                        role_assigned = await self._assign_agevet_role(ctx.guild, discord_user)
+                                        if role_assigned:
+                                            discord_users_updated += 1
+                                            self.log.debug(f"Assigned agevet role to {discord_user} for ckey {ckey}")
+                        except Exception as e:
+                            self.log.warning(f"Error processing Discord users for ckey {ckey}: {e}")
+
+                        processed += 1
+
+                    except Exception as e:
+                        error_details.append(f"Row {i} (ckey: {record.get('ckey', 'unknown')}): {str(e)}")
+                        errors += 1
+                        self.log.error(f"Error processing CSV row {i}: {e}")
+
+                # Send results
+                embed = discord.Embed(
+                    title="CSV Age Verification Load Complete",
+                    color=discord.Color.green() if errors == 0 else discord.Color.orange(),
+                    timestamp=discord.utils.utcnow()
+                )
+
+                embed.add_field(name="📊 Total Records", value=str(len(records)), inline=True)
+                embed.add_field(name="✅ Processed", value=str(processed), inline=True)
+                embed.add_field(name="🆕 Created", value=str(created), inline=True)
+                embed.add_field(name="🔄 Updated", value=str(updated), inline=True)
+                embed.add_field(name="👥 Discord Users Updated", value=str(discord_users_updated), inline=True)
+                embed.add_field(name="❌ Errors", value=str(errors), inline=True)
+
+                if error_details:
+                    # Truncate error details if too long
+                    error_text = "\n".join(error_details[:10])  # Show first 10 errors
+                    if len(error_details) > 10:
+                        error_text += f"\n... and {len(error_details) - 10} more errors"
+
+                    if len(error_text) > 1024:
+                        error_text = error_text[:1020] + "..."
+
+                    embed.add_field(name="Error Details", value=f"```\n{error_text}\n```", inline=False)
+
+                embed.set_footer(text=f"CSV load completed by {ctx.author.display_name}")
+                await ctx.send(embed=embed)
+
+                # Log summary
+                self.log.info(f"CSV age verification load completed: {processed} processed, {created} created, {updated} updated, {discord_users_updated} Discord users updated, {errors} errors")
+
+            except Exception as e:
+                self.log.error(f"Error loading CSV age verification data: {e}")
+                await ctx.send(f"❌ An error occurred while loading CSV data: {e}")
 
     def _calculate_age(self, birth_date: datetime.date) -> int:
         """Calculate age from birth date."""
