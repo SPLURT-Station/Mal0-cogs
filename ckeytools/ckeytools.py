@@ -1937,6 +1937,14 @@ class CkeyTools(commands.Cog):
         except Exception as e:
             self.log.error(f"Error ensuring roles for {user} in {guild}: {e}")
 
+    async def ensure_user_roles_with_agevet(self, guild, user, ckey):
+        """Ensure a verified user has the correct roles, including agevet role if applicable."""
+        # First ensure basic verification roles
+        await self.ensure_user_roles(guild, user)
+
+        # Then check and assign agevet role if applicable
+        await self._check_and_assign_agevet_role(guild, user, ckey)
+
     def generate_auto_token(self, original_token, dt):
         """Generate a new one_time_token for auto-verification based on the original token and datetime."""
         hash_input = f"{original_token}:{dt.isoformat()}"
@@ -1978,13 +1986,14 @@ class CkeyTools(commands.Cog):
         is_verified = await self.is_user_verified(guild, user)
         if is_verified:
             self.log.info(f"User {user} is already verified, skipping auto-verification")
-            # User already has a valid link, just ensure they have roles
-            await self.ensure_user_roles(guild, user)
 
-            # Get their ckey for the message
+            # Get their ckey for the message and role assignment
             try:
                 valid_link = await self.fetch_valid_discord_link(guild, user.id)
                 ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
+
+                # Ensure they have roles including agevet role if applicable
+                await self.ensure_user_roles_with_agevet(guild, user, ckey)
 
                 if channel:
                     await channel.send(f"You are already verified as `{ckey}`. Your roles have been updated if needed.")
@@ -2076,8 +2085,8 @@ class CkeyTools(commands.Cog):
             deverified_users.remove(user.id)
             await self.config.guild(guild).deverified_users.set(deverified_users)
 
-        # Assign roles using the helper function
-        await self.ensure_user_roles(guild, user)
+        # Assign roles using the comprehensive helper function (includes agevet check)
+        await self.ensure_user_roles_with_agevet(guild, user, ckey)
 
         # Send comprehensive DM embed to user
         await self.send_verification_success_dm(guild, user, ckey)
@@ -2339,19 +2348,22 @@ class CkeyTools(commands.Cog):
         # Check if user is already verified
         is_verified = await self.is_user_verified(guild, user)
         if is_verified:
-            # Ensure they have the correct roles
-            await self.ensure_user_roles(guild, user)
-
-            # Get their ckey for the message
+            # Get their ckey for the message and role assignment
             try:
                 valid_link = await self.fetch_valid_discord_link(guild, user.id)
                 ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
+
+                # Ensure they have the correct roles including agevet role if applicable
+                await self.ensure_user_roles_with_agevet(guild, user, ckey)
+
                 await interaction.response.send_message(
                     f"✅ You are already verified as `{ckey}`. Your roles have been updated if needed.",
                     ephemeral=True
                 )
             except Exception as e:
                 self.log.error(f"Error fetching ckey for already verified user {user}: {e}")
+                # Still try to ensure basic roles even if we can't get the ckey
+                await self.ensure_user_roles(guild, user)
                 await interaction.response.send_message(
                     "✅ You are already verified. Your roles have been updated if needed.",
                     ephemeral=True
@@ -2799,6 +2811,41 @@ class CkeyTools(commands.Cog):
                 return True
         except Exception as e:
             self.log.error(f"Error removing agevet role from {user} in {guild.name}: {e}")
+            return False
+
+    async def _check_and_assign_agevet_role(self, guild, user, ckey):
+        """Check if a user is age vetted and assign the role if they are."""
+        try:
+            # Check if agevet system is enabled
+            agevet_enabled = await self.config.guild(guild).agevet_enabled()
+            if not agevet_enabled:
+                return False  # Agevet system not enabled
+
+            # Check if API is configured
+            try:
+                await self._get_agevet_headers(guild)
+                await self._get_agevet_url(guild)
+            except ValueError:
+                return False  # API not configured
+
+            # Check if user is age vetted
+            try:
+                record = await self.get_agevet_record(guild, ckey)
+                if record:
+                    # User is age vetted, assign the role
+                    role_assigned = await self._assign_agevet_role(guild, user)
+                    if role_assigned:
+                        self.log.info(f"Silently assigned agevet role to {user} ({ckey}) during verification")
+                    return True
+                else:
+                    self.log.debug(f"User {user} ({ckey}) is not age vetted")
+                    return False
+            except Exception as e:
+                self.log.warning(f"Error checking agevet status for {user} ({ckey}): {e}")
+                return False
+
+        except Exception as e:
+            self.log.error(f"Error in agevet check for {user} ({ckey}): {e}")
             return False
 
     async def _collect_ckeys_for_role(self, guild: discord.Guild, role: discord.Role) -> list:
@@ -3504,7 +3551,7 @@ class CkeyTools(commands.Cog):
 
                 # If all parsing attempts failed, raise the original error
                 if 'records' not in locals():
-                    raise csv.Error(f"Failed to parse CSV file: {e}")
+                    raise csv.Error("Failed to parse CSV file with all parsing methods")
 
                 if not records:
                     await ctx.send("❌ CSV file is empty or has no valid records.")
