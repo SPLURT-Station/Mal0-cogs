@@ -3674,6 +3674,194 @@ class CkeyTools(commands.Cog):
                 self.log.error(f"Error loading CSV age verification data: {e}")
                 await ctx.send(f"❌ An error occurred while loading CSV data: {e}")
 
+    @agevet.command(name="sync")
+    @checks.admin_or_permissions(administrator=True)
+    async def agevet_sync(self, ctx: commands.Context):
+        """
+        Sync age verification roles for all users in the guild.
+
+        This command will:
+        1. Fetch all age verification records from the BackgroundCheck API
+        2. For each vetted ckey, find the corresponding Discord user in the database
+        3. Assign the agevet role to users who are vetted but don't have the role
+        4. Optionally remove the role from users who have it but aren't vetted
+
+        This is useful for:
+        - Initial setup after configuring the agevet system
+        - Recovering from role misconfigurations
+        - Ensuring role consistency with the BackgroundCheck database
+
+        Use: `[p]ckeytools agevet sync`
+        """
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        # Check if agevet system is enabled
+        agevet_enabled = await self.config.guild(ctx.guild).agevet_enabled()
+        if not agevet_enabled:
+            await ctx.send("❌ Age verification system is not enabled. Use `[p]ckeytools agevet config enable` to enable it.")
+            return
+
+        # Check if database is connected
+        if not self.db_manager.is_connected(ctx.guild.id):
+            await ctx.send("❌ Database is not connected. Please configure the database connection first.")
+            return
+
+        # Check if API is configured
+        try:
+            await self._get_agevet_headers(ctx.guild)
+            api_url = await self._get_agevet_url(ctx.guild)
+        except ValueError as e:
+            await ctx.send(f"❌ Age verification API not configured: {e}")
+            return
+
+        # Check if agevet role is configured
+        agevet_role_id = await self.config.guild(ctx.guild).agevet_role()
+        if not agevet_role_id:
+            await ctx.send("❌ AgeVet role is not configured. Use `[p]ckeytools agevet config role` to set it.")
+            return
+
+        agevet_role = ctx.guild.get_role(agevet_role_id)
+        if not agevet_role:
+            await ctx.send("❌ Configured agevet role not found. It may have been deleted.")
+            return
+
+        initial_message = await ctx.send("🔄 Starting age verification role sync...\nThis may take a while for large servers.")
+
+        async with ctx.typing():
+            try:
+                # Fetch all age verification records from the API
+                self.log.info(f"Fetching all age verification records for guild {ctx.guild.name}")
+
+                # Make a GET request to fetch all records (without ckey filter)
+                headers = await self._get_agevet_headers(ctx.guild)
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url=api_url.rstrip('/'),
+                        headers=headers,
+                        params={"fields": "ckey,date_of_birth,created_at"}
+                    ) as response:
+                        if response.status >= 400:
+                            response_data = await response.json()
+                            error_msg = response_data.get('error', f'HTTP {response.status}')
+                            await initial_message.edit(content=f"❌ API Error: {error_msg}")
+                            return
+
+                        agevet_records = await response.json()
+
+                if not isinstance(agevet_records, list):
+                    agevet_records = [agevet_records] if agevet_records else []
+
+                self.log.info(f"Found {len(agevet_records)} age verification records")
+
+                # Track statistics
+                roles_assigned = 0
+                roles_already_had = 0
+                users_not_found = 0
+                users_not_verified = 0
+                errors = 0
+                error_details = []
+
+                # Process each age verification record
+                for record in agevet_records:
+                    try:
+                        ckey = record.get('ckey')
+                        if not ckey:
+                            continue
+
+                        # Normalize ckey
+                        ckey = normalise_to_ckey(ckey)
+
+                        # Find Discord users with this ckey in the database
+                        try:
+                            all_links = await self.db_manager.get_all_links_by_ckey(ctx.guild.id, ckey)
+
+                            # Process each valid link for this ckey
+                            valid_links_found = False
+                            for link in all_links:
+                                if link.valid and link.discord_id:
+                                    valid_links_found = True
+                                    # Find the Discord user
+                                    discord_user = ctx.guild.get_member(link.discord_id)
+
+                                    if discord_user:
+                                        # Check if user already has the role
+                                        if agevet_role in discord_user.roles:
+                                            roles_already_had += 1
+                                            self.log.debug(f"User {discord_user} already has agevet role for ckey {ckey}")
+                                        else:
+                                            # Assign the role
+                                            try:
+                                                await discord_user.add_roles(agevet_role, reason="Age verification role sync")
+                                                roles_assigned += 1
+                                                self.log.info(f"Assigned agevet role to {discord_user} for ckey {ckey}")
+                                            except discord.Forbidden:
+                                                error_details.append(f"No permission to assign role to {discord_user.display_name} ({ckey})")
+                                                errors += 1
+                                            except Exception as e:
+                                                error_details.append(f"Error assigning role to {discord_user.display_name} ({ckey}): {e}")
+                                                errors += 1
+                                    else:
+                                        users_not_found += 1
+                                        self.log.debug(f"User with discord_id {link.discord_id} not found in guild for ckey {ckey}")
+
+                            if not valid_links_found:
+                                users_not_verified += 1
+                                self.log.debug(f"No valid Discord links found for ckey {ckey}")
+
+                        except Exception as e:
+                            error_details.append(f"Error processing ckey {ckey}: {e}")
+                            errors += 1
+                            self.log.error(f"Error processing Discord users for ckey {ckey}: {e}")
+
+                    except Exception as e:
+                        error_details.append(f"Error processing record: {e}")
+                        errors += 1
+                        self.log.error(f"Error processing agevet record: {e}")
+
+                # Send results
+                embed = discord.Embed(
+                    title="Age Verification Role Sync Complete",
+                    color=discord.Color.green() if errors == 0 else discord.Color.orange(),
+                    timestamp=discord.utils.utcnow()
+                )
+
+                embed.add_field(name="📊 Total Records in API", value=str(len(agevet_records)), inline=True)
+                embed.add_field(name="✅ Roles Assigned", value=str(roles_assigned), inline=True)
+                embed.add_field(name="🔄 Already Had Role", value=str(roles_already_had), inline=True)
+                embed.add_field(name="👻 Users Not in Server", value=str(users_not_found), inline=True)
+                embed.add_field(name="🔗 No Discord Link", value=str(users_not_verified), inline=True)
+                embed.add_field(name="❌ Errors", value=str(errors), inline=True)
+
+                if error_details:
+                    # Truncate error details if too long
+                    error_text = "\n".join(error_details[:10])  # Show first 10 errors
+                    if len(error_details) > 10:
+                        error_text += f"\n... and {len(error_details) - 10} more errors"
+
+                    if len(error_text) > 1024:
+                        error_text = error_text[:1020] + "..."
+
+                    embed.add_field(name="Error Details", value=f"```\n{error_text}\n```", inline=False)
+
+                embed.add_field(
+                    name="💡 Summary",
+                    value=f"Successfully synced age verification roles. {roles_assigned} users received the {agevet_role.mention} role.",
+                    inline=False
+                )
+
+                embed.set_footer(text=f"Sync completed by {ctx.author.display_name}")
+                await initial_message.edit(content=None, embed=embed)
+
+                # Log summary
+                self.log.info(f"Age verification role sync completed: {roles_assigned} roles assigned, {roles_already_had} already had role, {users_not_found} users not found, {users_not_verified} no Discord link, {errors} errors")
+
+            except Exception as e:
+                self.log.error(f"Error during age verification role sync: {e}")
+                await initial_message.edit(content=f"❌ An error occurred during sync: {e}")
+
     def _calculate_age(self, birth_date: datetime.date) -> int:
         """Calculate age from birth date."""
         today = datetime.date.today()
