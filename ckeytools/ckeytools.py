@@ -2959,7 +2959,18 @@ class CkeyTools(commands.Cog):
         file_path = os.path.abspath(os.path.join(folder, file_name))
         try:
             with open(file_path, "r", encoding="utf-8") as fp:
-                await ctx.send(chat_formatting.box(fp.read(), "toml"))
+                content = fp.read()
+
+            # Check if content is small enough to send as a message
+            # Discord message limit is 2000 chars, but with code block formatting we need some buffer
+            # chat_formatting.box adds backticks and language specifier
+            formatted = chat_formatting.box(content, "toml")
+            if len(formatted) <= 1900:  # Safe limit to avoid hitting the 2000 char limit
+                await ctx.send(formatted)
+            else:
+                # Content too large, send as file attachment
+                file = discord.File(io.BytesIO(content.encode('utf-8')), filename=file_name)
+                await ctx.send("File is too large to display in chat. Sending as attachment:", file=file)
         except FileNotFoundError:
             await ctx.send("❌ autoroles file not found. Try running `update` first.")
 
