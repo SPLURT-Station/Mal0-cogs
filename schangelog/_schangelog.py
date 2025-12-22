@@ -209,54 +209,67 @@ class SChangelog(commands.Cog):
         # Discord field value limit is 1024 characters. chat_formatting.box() adds the code block markers.
         # We check the actual boxed length to ensure we stay under 1024.
         fields: List[Tuple[str, str]] = []
+        
+        def _save_content_if_safe(current_content: str, name: str) -> str:
+            """Save current content to fields if it's safe, return empty string. Otherwise return truncated safe content."""
+            if not current_content.strip():
+                return ""
+            boxed = chat_formatting.box(current_content.strip(), "yaml")
+            if len(boxed) <= 1024:
+                fields.append((name, boxed))
+                return ""
+            # Content is too long, truncate it
+            safe = current_content.strip()
+            while len(chat_formatting.box(safe, "yaml")) > 1024:
+                lines = safe.split("\n")
+                if len(lines) <= 1:
+                    safe = safe[:1010]
+                    break
+                safe = "\n".join(lines[:-1])
+            if safe:
+                fields.append((name, chat_formatting.box(safe, "yaml")))
+            return ""
+        
         for author, tags in aggregated_by_author.items():
             shown_name = author
             content = ""
             for tag, entries in tags.items():
                 content += f"\n{tag}: "
                 for entry in entries:
+                    # First, check if current content is already at or near limit
+                    if content.strip():
+                        boxed_current = chat_formatting.box(content.strip(), "yaml")
+                        if len(boxed_current) >= 1000:  # Conservative threshold
+                            # Save current content before it gets too long
+                            content = _save_content_if_safe(content, shown_name)
+                            shown_name = "\u200b"
+                            # Restart with just the tag
+                            content = f"\n{tag}: "
+                    
                     # Test if adding this entry would exceed 1024 when boxed
                     test_content = (content + "\n  - " + entry).strip()
                     boxed_test = chat_formatting.box(test_content, "yaml")
                     if len(boxed_test) > 1024:
-                        # Current content (without the new entry) is safe to box
-                        if content.strip():
-                            fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
+                        # Save current content (without the new entry)
+                        content = _save_content_if_safe(content, shown_name)
+                        shown_name = "\u200b"
                         # Start new content with just the tag and this entry
-                        # Check if even this single entry is too long when boxed
                         single_entry_content = f"\n{tag}:\n  - {entry}"
                         boxed_single = chat_formatting.box(single_entry_content.strip(), "yaml")
                         if len(boxed_single) > 1024:
                             # Entry is too long even by itself, truncate it
-                            # Leave room for tag, formatting, and box markers
                             max_entry_len = 1000  # Conservative limit
                             truncated_entry = entry[:max_entry_len] + "..." if len(entry) > max_entry_len else entry
                             content = f"\n{tag}:\n  - {truncated_entry}"
                         else:
                             content = single_entry_content
-                        shown_name = "\u200b"
                     else:
                         content += "\n  - " + entry
+            
             # Add remaining content if any
             if content.strip():
-                boxed_final = chat_formatting.box(content.strip(), "yaml")
-                # Final safety check
-                if len(boxed_final) > 1024:
-                    # This shouldn't happen, but if it does, truncate to fit
-                    safe_content = content.strip()
-                    # Try removing lines until it fits
-                    while len(chat_formatting.box(safe_content, "yaml")) > 1024:
-                        lines = safe_content.split("\n")
-                        if len(lines) <= 1:
-                            # Can't split further, truncate the content itself
-                            # Leave room for box formatting (```yaml\n...\n``` = ~12 chars)
-                            safe_content = safe_content[:1010]
-                            break
-                        safe_content = "\n".join(lines[:-1])
-                    if safe_content:
-                        fields.append((shown_name, chat_formatting.box(safe_content, "yaml")))
-                else:
-                    fields.append((shown_name, boxed_final))
+                _save_content_if_safe(content, shown_name)
+        
         return fields
 
     def _new_base_embed(self, ctx: commands.Context, guild: discord.Guild, title: str, description: str, eColor: Tuple[int, int, int], footer: str, author_url: Optional[str]) -> discord.Embed:
