@@ -206,8 +206,8 @@ class SChangelog(commands.Cog):
 
     def _build_fields_from_aggregated(self, aggregated_by_author: Dict[str, Dict[str, List[str]]]) -> List[Tuple[str, str]]:
         # Convert aggregated author->tag->[entries] mapping into a list of (field_name, field_value)
-        # Discord field value limit is 1024 characters. chat_formatting.box() adds ~10 chars (```yaml\n...\n```)
-        # So we limit content to ~1000 to leave room for the box formatting
+        # Discord field value limit is 1024 characters. chat_formatting.box() adds the code block markers.
+        # We check the actual boxed length to ensure we stay under 1024.
         fields: List[Tuple[str, str]] = []
         for author, tags in aggregated_by_author.items():
             shown_name = author
@@ -215,14 +215,48 @@ class SChangelog(commands.Cog):
             for tag, entries in tags.items():
                 content += f"\n{tag}: "
                 for entry in entries:
-                    # Check if adding this entry would exceed safe limit (accounting for box formatting)
-                    if len(content + "\n  - " + entry) > 1000:
-                        fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
-                        content = f"\n{tag}: "
+                    # Test if adding this entry would exceed 1024 when boxed
+                    test_content = (content + "\n  - " + entry).strip()
+                    boxed_test = chat_formatting.box(test_content, "yaml")
+                    if len(boxed_test) > 1024:
+                        # Current content (without the new entry) is safe to box
+                        if content.strip():
+                            fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
+                        # Start new content with just the tag and this entry
+                        # Check if even this single entry is too long when boxed
+                        single_entry_content = f"\n{tag}:\n  - {entry}"
+                        boxed_single = chat_formatting.box(single_entry_content.strip(), "yaml")
+                        if len(boxed_single) > 1024:
+                            # Entry is too long even by itself, truncate it
+                            # Leave room for tag, formatting, and box markers
+                            max_entry_len = 1000  # Conservative limit
+                            truncated_entry = entry[:max_entry_len] + "..." if len(entry) > max_entry_len else entry
+                            content = f"\n{tag}:\n  - {truncated_entry}"
+                        else:
+                            content = single_entry_content
                         shown_name = "\u200b"
-                    content += "\n  - " + entry
+                    else:
+                        content += "\n  - " + entry
+            # Add remaining content if any
             if content.strip():
-                fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
+                boxed_final = chat_formatting.box(content.strip(), "yaml")
+                # Final safety check
+                if len(boxed_final) > 1024:
+                    # This shouldn't happen, but if it does, truncate to fit
+                    safe_content = content.strip()
+                    # Try removing lines until it fits
+                    while len(chat_formatting.box(safe_content, "yaml")) > 1024:
+                        lines = safe_content.split("\n")
+                        if len(lines) <= 1:
+                            # Can't split further, truncate the content itself
+                            # Leave room for box formatting (```yaml\n...\n``` = ~12 chars)
+                            safe_content = safe_content[:1010]
+                            break
+                        safe_content = "\n".join(lines[:-1])
+                    if safe_content:
+                        fields.append((shown_name, chat_formatting.box(safe_content, "yaml")))
+                else:
+                    fields.append((shown_name, boxed_final))
         return fields
 
     def _new_base_embed(self, ctx: commands.Context, guild: discord.Guild, title: str, description: str, eColor: Tuple[int, int, int], footer: str, author_url: Optional[str]) -> discord.Embed:
