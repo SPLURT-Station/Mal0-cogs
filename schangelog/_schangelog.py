@@ -206,6 +206,8 @@ class SChangelog(commands.Cog):
 
     def _build_fields_from_aggregated(self, aggregated_by_author: Dict[str, Dict[str, List[str]]]) -> List[Tuple[str, str]]:
         # Convert aggregated author->tag->[entries] mapping into a list of (field_name, field_value)
+        # Discord field value limit is 1024 characters. chat_formatting.box() adds ~10 chars (```yaml\n...\n```)
+        # So we limit content to ~1000 to leave room for the box formatting
         fields: List[Tuple[str, str]] = []
         for author, tags in aggregated_by_author.items():
             shown_name = author
@@ -213,7 +215,8 @@ class SChangelog(commands.Cog):
             for tag, entries in tags.items():
                 content += f"\n{tag}: "
                 for entry in entries:
-                    if len(content + "\n  - " + entry) > 1014:
+                    # Check if adding this entry would exceed safe limit (accounting for box formatting)
+                    if len(content + "\n  - " + entry) > 1000:
                         fields.append((shown_name, chat_formatting.box(content.strip(), "yaml")))
                         content = f"\n{tag}: "
                         shown_name = "\u200b"
@@ -230,19 +233,49 @@ class SChangelog(commands.Cog):
         embed.set_thumbnail(url=guildpic)
         return embed
 
+    @staticmethod
+    def _calculate_embed_size(embed: discord.Embed) -> int:
+        """
+        Calculate the total character count of an embed according to Discord's rules.
+        Discord counts: title + description + footer text + author name + all field names + all field values.
+        """
+        size = 0
+        if embed.title:
+            size += len(embed.title)
+        if embed.description:
+            size += len(embed.description)
+        if embed.footer and embed.footer.text:
+            size += len(embed.footer.text)
+        if embed.author and embed.author.name:
+            size += len(embed.author.name)
+        for field in embed.fields:
+            if field.name:
+                size += len(field.name)
+            if field.value:
+                size += len(field.value)
+        return size
+
     def _paginate_embeds(self, ctx: commands.Context, guild: discord.Guild, base_title: str, base_description: str, eColor: Tuple[int, int, int], footer: str, author_url: Optional[str], fields: List[Tuple[str, str]]) -> List[discord.Embed]:
         # Build a list of embeds, each under Discord's 6000 character limit and 25 fields
         pages: List[discord.Embed] = []
         current = self._new_base_embed(ctx, guild, base_title, base_description, eColor, footer, author_url)
         field_count = 0
+        # Calculate base embed size (title, description, footer, author)
+        base_size = self._calculate_embed_size(current)
+
         for name, value in fields:
-            # If adding this field would exceed limits, start a new page
-            if field_count >= 25 or (len(current) + len(str(name)) + len(str(value)) > 5900):
+            name_str = str(name)
+            value_str = str(value)
+            # Check if adding this field would exceed limits
+            # Use 5800 as a safe buffer under the 6000 limit
+            if field_count >= 25 or (base_size + len(name_str) + len(value_str) > 5800):
                 pages.append(current)
                 # continued title for subsequent pages
                 current = self._new_base_embed(ctx, guild, f"{base_title} (cont.)", base_description, eColor, footer, author_url)
+                base_size = self._calculate_embed_size(current)
                 field_count = 0
             current.add_field(name=name, value=value, inline=False)
+            base_size += len(name_str) + len(value_str)
             field_count += 1
         # Always append the last embed, even if it has zero fields (header-only)
         pages.append(current)
@@ -616,13 +649,21 @@ class SChangelog(commands.Cog):
         # Add fields while respecting embed total size. If it would overflow, truncate with a summary field.
         remaining_fields = self._build_fields_from_aggregated(data_by_author)
         added = 0
+        current_size = self._calculate_embed_size(embed)
         for name, value in remaining_fields:
-            if added >= 25 or (len(embed) + len(str(name)) + len(str(value)) > 5900):
+            name_str = str(name)
+            value_str = str(value)
+            # Use 5800 as a safe buffer under the 6000 limit
+            if added >= 25 or (current_size + len(name_str) + len(value_str) > 5800):
                 hidden = len(remaining_fields) - added
                 if hidden > 0:
-                    embed.add_field(name="More…", value=f"{hidden} additional field(s) not shown due to embed limits.", inline=False)
+                    more_text = f"{hidden} additional field(s) not shown due to embed limits."
+                    # Check if we can add the "More..." field without exceeding limits
+                    if current_size + len("More…") + len(more_text) <= 5800:
+                        embed.add_field(name="More…", value=more_text, inline=False)
                 break
             embed.add_field(name=name, value=value, inline=False)
+            current_size += len(name_str) + len(value_str)
             added += 1
         return embed
 
