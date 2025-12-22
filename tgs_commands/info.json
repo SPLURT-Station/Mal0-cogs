@@ -19,6 +19,5 @@
     "min_bot_version": "3.5.0",
     "hidden": false,
     "end_user_data_statement": "This cog stores TGS API credentials (URL, username, password) in Red's Config. No other user data is stored.",
-    "required_cogs": [],
     "type": "COG"
 }
