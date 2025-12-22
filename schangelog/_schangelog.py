@@ -209,7 +209,7 @@ class SChangelog(commands.Cog):
         # Discord field value limit is 1024 characters. chat_formatting.box() adds the code block markers.
         # We check the actual boxed length to ensure we stay under 1024.
         fields: List[Tuple[str, str]] = []
-        
+
         def _save_content_if_safe(current_content: str, name: str) -> str:
             """Save current content to fields if it's safe, return empty string. Otherwise return truncated safe content."""
             if not current_content.strip():
@@ -223,13 +223,20 @@ class SChangelog(commands.Cog):
             while len(chat_formatting.box(safe, "yaml")) > 1024:
                 lines = safe.split("\n")
                 if len(lines) <= 1:
-                    safe = safe[:1010]
+                    safe = safe[:1000]  # More aggressive truncation
                     break
                 safe = "\n".join(lines[:-1])
             if safe:
-                fields.append((name, chat_formatting.box(safe, "yaml")))
+                boxed_safe = chat_formatting.box(safe, "yaml")
+                # Final verification - if still too long, truncate more aggressively
+                if len(boxed_safe) > 1024:
+                    safe = safe[:990]  # Even more aggressive
+                    boxed_safe = chat_formatting.box(safe, "yaml")
+                # Only add if it's actually safe now
+                if len(boxed_safe) <= 1024:
+                    fields.append((name, boxed_safe))
             return ""
-        
+
         for author, tags in aggregated_by_author.items():
             shown_name = author
             content = ""
@@ -239,13 +246,13 @@ class SChangelog(commands.Cog):
                     # First, check if current content is already at or near limit
                     if content.strip():
                         boxed_current = chat_formatting.box(content.strip(), "yaml")
-                        if len(boxed_current) >= 1000:  # Conservative threshold
+                        if len(boxed_current) >= 950:  # Conservative threshold to leave room for entries
                             # Save current content before it gets too long
                             content = _save_content_if_safe(content, shown_name)
                             shown_name = "\u200b"
                             # Restart with just the tag
                             content = f"\n{tag}: "
-                    
+
                     # Test if adding this entry would exceed 1024 when boxed
                     test_content = (content + "\n  - " + entry).strip()
                     boxed_test = chat_formatting.box(test_content, "yaml")
@@ -265,11 +272,11 @@ class SChangelog(commands.Cog):
                             content = single_entry_content
                     else:
                         content += "\n  - " + entry
-            
+
             # Add remaining content if any
             if content.strip():
                 _save_content_if_safe(content, shown_name)
-        
+
         return fields
 
     def _new_base_embed(self, ctx: commands.Context, guild: discord.Guild, title: str, description: str, eColor: Tuple[int, int, int], footer: str, author_url: Optional[str]) -> discord.Embed:
@@ -313,6 +320,11 @@ class SChangelog(commands.Cog):
         for name, value in fields:
             name_str = str(name)
             value_str = str(value)
+            # Safety check: Discord field value limit is 1024 characters
+            if len(value_str) > 1024:
+                # Truncate the value if it's too long (shouldn't happen with our checks, but be safe)
+                value_str = value_str[:1021] + "..."
+                value = value_str
             # Check if adding this field would exceed limits
             # Use 5800 as a safe buffer under the 6000 limit
             if field_count >= 25 or (base_size + len(name_str) + len(value_str) > 5800):
