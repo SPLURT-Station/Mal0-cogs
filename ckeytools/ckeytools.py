@@ -2628,7 +2628,7 @@ class CkeyTools(commands.Cog):
         channel_name = f"verify-{user.name}"
         try:
             if not guild:
-                await interaction.response.send_message("❌ Guild not found.", ephemeral=True)
+                await interaction.followup.send("❌ Guild not found.", ephemeral=True)
                 return
             ticket_channel = await guild.create_text_channel(
                 name=channel_name,
@@ -2658,7 +2658,7 @@ class CkeyTools(commands.Cog):
                 # Discord not autoverified, send Discord verification prompt
                 ticket_embed = await self.config.guild(guild).ticket_embed()
                 await self.send_verification_prompt(user, ticket_channel, ticket_embed)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
                 )
                 return  # Exit early, user needs to complete Discord verification first
@@ -2668,7 +2668,7 @@ class CkeyTools(commands.Cog):
             if not agegate_enabled:
                 # Age gate not enabled, close ticket after Discord verification
                 await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
                 )
                 return
@@ -2678,20 +2678,20 @@ class CkeyTools(commands.Cog):
             if agevet_auto_verified:
                 # Age vet autoverified, finish verification
                 await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
                 )
                 return
             else:
                 # Age vet not autoverified, proceed to age gate step
                 await self.start_agegate_step(guild, user, ckey, ticket_channel)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
                 )
                 return
         except Exception as e:
             self.log.error(f"Error creating verification ticket: {e}")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Error creating verification ticket. Please try again or contact an administrator.", ephemeral=True
             )
 
@@ -2749,13 +2749,18 @@ class CkeyTools(commands.Cog):
             )
             return
 
-        # Always create a verification ticket (autoverification will happen within the ticket)
+        # Validate user and category types before deferring
         if not isinstance(user, discord.Member):
             await interaction.response.send_message("❌ User must be a guild member.", ephemeral=True)
             return
         if not isinstance(category, discord.CategoryChannel):
             await interaction.response.send_message("❌ Category must be a category channel.", ephemeral=True)
             return
+
+        # Defer the response since we'll be doing async operations that may take time
+        await interaction.response.defer(ephemeral=True)
+
+        # Always create a verification ticket (autoverification will happen within the ticket)
         await self.create_verification_ticket(interaction, user, category, ticket_embed_data)
 
     @commands.hybrid_command(name="closeverification", description="Close this verification ticket")
