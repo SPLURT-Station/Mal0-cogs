@@ -2970,8 +2970,8 @@ class CkeyTools(commands.Cog):
         await channel.send(
             f"✅ Thank you for submitting your age verification image, {opener.mention}!\n\n"
             f"{verifier_mention}Please wait for a staff member to verify your age verification. "
-            f"A moderator will review your submission shortly."
-        )
+            f"A moderator will review your submission shortly.",
+        allowed_mentions=discord.AllowedMentions(roles=True, users=True))
 
         self.log.info(f"Age gate image submitted by {opener} ({opener.id}) in ticket {channel.id}")
 
