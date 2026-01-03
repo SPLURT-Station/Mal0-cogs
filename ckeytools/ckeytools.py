@@ -2709,31 +2709,6 @@ class CkeyTools(commands.Cog):
             )
             return
 
-        # Check if user is already verified
-        is_verified = await self.is_user_verified(guild, user)
-        if is_verified:
-            # Get their ckey for the message and role assignment
-            try:
-                valid_link = await self.fetch_valid_discord_link(guild, user.id)
-                ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
-
-                # Ensure they have the correct roles including agevet role if applicable
-                await self.ensure_user_roles_with_agevet(guild, user, ckey)
-
-                await interaction.response.send_message(
-                    f"✅ You are already verified as `{ckey}`. Your roles have been updated if needed.",
-                    ephemeral=True
-                )
-            except Exception as e:
-                self.log.error(f"Error fetching ckey for already verified user {user}: {e}")
-                # Still try to ensure basic roles even if we can't get the ckey
-                await self.ensure_user_roles(guild, user)
-                await interaction.response.send_message(
-                    "✅ You are already verified. Your roles have been updated if needed.",
-                    ephemeral=True
-                )
-            return
-
         # Check if user already has an open ticket
         open_ticket = await self.config.member(user).open_ticket()
         if open_ticket and guild:
@@ -2774,59 +2749,14 @@ class CkeyTools(commands.Cog):
             )
             return
 
-        # Run autoverification to check if we need to create a ticket
-        discord_verified, ckey = await self.try_auto_verify_discord(guild, user, channel=None, dm=False)
-        agegate_enabled = await self.config.guild(guild).agegate_enabled()
-
-        if discord_verified and ckey:
-            # Discord is verified, check if we need age gate
-            if not agegate_enabled:
-                # Only Discord verification is enabled, autoverify and don't create ticket
-                await self.ensure_user_roles(guild, user)
-                # Try auto-agevet if configured
-                agevet_enabled = await self.config.guild(guild).agevet_enabled()
-                if agevet_enabled:
-                    await self.try_auto_verify_agevet(guild, user, ckey)
-                await interaction.response.send_message(
-                    f"✅ Automatic verification completed! Welcome, `{ckey}`.",
-                    ephemeral=True
-                )
-                return
-            else:
-                # Age gate is enabled, check if age vet record exists
-                agevet_record = None
-                try:
-                    agevet_record = await self.get_agevet_record(guild, ckey)
-                except Exception as e:
-                    self.log.warning(f"Error checking agevet record for {ckey}: {e}")
-
-                if not agevet_record:
-                    # Age gate enabled but no age vet record, need to create ticket
-                    if not isinstance(user, discord.Member):
-                        await interaction.response.send_message("❌ User must be a guild member.", ephemeral=True)
-                        return
-                    if not isinstance(category, discord.CategoryChannel):
-                        await interaction.response.send_message("❌ Category must be a category channel.", ephemeral=True)
-                        return
-                    await self.create_verification_ticket(interaction, user, category, ticket_embed_data)
-                    return
-                else:
-                    # Both Discord and age vet are verified, autoverify and don't create ticket
-                    await self.ensure_user_roles_with_agevet(guild, user, ckey)
-                    await interaction.response.send_message(
-                        f"✅ Automatic verification completed! Welcome, `{ckey}`.",
-                        ephemeral=True
-                    )
-                    return
-        else:
-            # Discord not verified, need to create ticket
-            if not isinstance(user, discord.Member):
-                await interaction.response.send_message("❌ User must be a guild member.", ephemeral=True)
-                return
-            if not isinstance(category, discord.CategoryChannel):
-                await interaction.response.send_message("❌ Category must be a category channel.", ephemeral=True)
-                return
-            await self.create_verification_ticket(interaction, user, category, ticket_embed_data)
+        # Always create a verification ticket (autoverification will happen within the ticket)
+        if not isinstance(user, discord.Member):
+            await interaction.response.send_message("❌ User must be a guild member.", ephemeral=True)
+            return
+        if not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message("❌ Category must be a category channel.", ephemeral=True)
+            return
+        await self.create_verification_ticket(interaction, user, category, ticket_embed_data)
 
     @commands.hybrid_command(name="closeverification", description="Close this verification ticket")
     @commands.guild_only()
