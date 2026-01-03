@@ -17,6 +17,8 @@ import tomlkit
 import aiohttp
 import csv
 import io
+import random
+import string
 try:
     from dateutil import parser as date_parser
 except ImportError:
@@ -2522,6 +2524,45 @@ class CkeyTools(commands.Cog):
         view = VerificationCodeView(self, user, ticket_channel.guild)
         await ticket_channel.send(f"{user.mention}", embed=embed, view=view)
 
+    def _generate_agegate_code(self) -> str:
+        """Generate a random 5-character code containing both letters and numbers."""
+        # Use uppercase letters and digits
+        characters = string.ascii_uppercase + string.digits
+        # Generate 5 random characters
+        code = ''.join(random.choice(characters) for _ in range(5))
+        return code
+
+    def _replace_code_in_embed_dict(self, embed_dict: Dict[str, Any], code: str) -> Dict[str, Any]:
+        """Recursively replace [CODE] wildcard in embed dictionary with the generated code."""
+        if not isinstance(embed_dict, dict):
+            return embed_dict
+
+        result = {}
+        for key, value in embed_dict.items():
+            if isinstance(value, str):
+                # Replace [CODE] in string values
+                result[key] = value.replace("[CODE]", code)
+            elif isinstance(value, dict):
+                # Recursively process nested dictionaries (e.g., footer, author)
+                result[key] = self._replace_code_in_embed_dict(value, code)
+            elif isinstance(value, list):
+                # Handle lists (e.g., fields array)
+                result[key] = []
+                for item in value:
+                    if isinstance(item, dict):
+                        # Recursively process dictionary items (e.g., field objects)
+                        result[key].append(self._replace_code_in_embed_dict(item, code))
+                    elif isinstance(item, str):
+                        # Replace [CODE] in string items
+                        result[key].append(item.replace("[CODE]", code))
+                    else:
+                        # Keep other types as-is
+                        result[key].append(item)
+            else:
+                # Keep other types as-is
+                result[key] = value
+        return result
+
     async def start_agegate_step(self, guild, user, ckey, ticket_channel):
         """Start the age gate verification step in the ticket."""
         agegate_embed_data = await self.config.guild(guild).agegate_embed()
@@ -2530,9 +2571,13 @@ class CkeyTools(commands.Cog):
             await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
             return
 
-        embed = discord.Embed.from_dict(agegate_embed_data)
+        # Generate a random code and replace [CODE] wildcard in the embed
+        code = self._generate_agegate_code()
+        agegate_embed_data_with_code = self._replace_code_in_embed_dict(agegate_embed_data, code)
+
+        embed = discord.Embed.from_dict(agegate_embed_data_with_code)
         msg = await ticket_channel.send(f"{user.mention}", embed=embed)
-        self.log.info(f"Started age gate step for user {user} ({ckey}) in ticket {ticket_channel.id}")
+        self.log.info(f"Started age gate step for user {user} ({ckey}) in ticket {ticket_channel.id} with code {code}")
 
     async def verify_code(self, guild, user, code):
         """Check if the code matches a valid, unlinked one_time_token in the database."""
