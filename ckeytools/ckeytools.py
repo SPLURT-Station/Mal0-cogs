@@ -77,11 +77,17 @@ class CkeyTools(commands.Cog):
             "agevet_api_url": None,  # BackgroundCheck API URL
             "agevet_api_key": None,  # API key for BackgroundCheck
             "agevet_role": None,  # Role ID to assign to age-vetted users
+            # agegate system (integrated with verification tickets)
+            "agegate_enabled": False,  # Whether age gate system is enabled in tickets
+            "agegate_embed": {},  # JSON dict for the age gate embed
+            "agegate_verifier_role": None,  # Role ID to ping when user submits age verification image
         }
         self.config.register_guild(**default_guild)
         # Per-user config (for future use, e.g. to track open tickets)
         default_member = {
             "open_ticket": None,  # Channel ID of open ticket, if any
+            "discord_verified": False,  # Track if Discord verification step is complete in current ticket
+            "agegate_pending": False,  # Track if age gate step is pending (user has submitted image)
         }
         self.config.register_member(**default_member)
 
@@ -1472,6 +1478,70 @@ class CkeyTools(commands.Cog):
             await ctx.send("✅ Auto-verification on join has been disabled.")
         await ctx.tick()
 
+    @verify_config.group(name="agegate")
+    async def agegate_config(self, ctx):
+        """Configure the age gate system for verification tickets."""
+        pass
+
+    @agegate_config.command(name="enable")
+    async def agegate_toggle(self, ctx, enabled: Optional[bool] = None):
+        """Enable or disable the age gate system in verification tickets."""
+        if enabled is None:
+            current = await self.config.guild(ctx.guild).agegate_enabled()
+            await ctx.send(f"Age gate system is currently **{'enabled' if current else 'disabled'}**.")
+            return
+
+        await self.config.guild(ctx.guild).agegate_enabled.set(enabled)
+        if enabled:
+            await ctx.send("✅ Age gate system has been enabled. Users will need to complete age verification after Discord verification.")
+        else:
+            await ctx.send("✅ Age gate system has been disabled.")
+        await ctx.tick()
+
+    @agegate_config.command(name="embed")
+    async def agegate_set_embed(self, ctx):
+        """Set the embed for the age gate step using an attached JSON file."""
+        if not ctx.message.attachments:
+            await ctx.send("❌ Please attach a JSON file containing the embed data to this command message.")
+            return
+        attachment = ctx.message.attachments[0]
+        if not attachment.filename.lower().endswith(".json"):
+            await ctx.send("❌ The attached file must be a .json file.")
+            return
+        try:
+            file_bytes = await attachment.read()
+            file_text = file_bytes.decode("utf-8")
+            embed_dict = json.loads(file_text)
+            embed = discord.Embed.from_dict(embed_dict)
+            await self.config.guild(ctx.guild).agegate_embed.set(embed_dict)
+            await ctx.send("**Preview:**", embed=embed)
+        except json.JSONDecodeError:
+            await ctx.send("❌ Invalid JSON format in the attached file.")
+        except Exception as e:
+            await ctx.send(f"❌ Error creating embed: {str(e)}")
+        else:
+            await ctx.send("✅ Age gate embed set successfully!")
+            await ctx.tick()
+
+    @agegate_config.command(name="verifierrole")
+    async def agegate_set_verifier_role(self, ctx, role: Optional[discord.Role] = None):
+        """Set the role to ping when users submit age verification images."""
+        if role is None:
+            current_role_id = await self.config.guild(ctx.guild).agegate_verifier_role()
+            if current_role_id:
+                current_role = ctx.guild.get_role(current_role_id)
+                if current_role:
+                    await ctx.send(f"Current age gate verifier role: {current_role.mention}")
+                else:
+                    await ctx.send("❌ Configured age gate verifier role not found. It may have been deleted.")
+            else:
+                await ctx.send("❌ No age gate verifier role configured.")
+            return
+
+        await self.config.guild(ctx.guild).agegate_verifier_role.set(role.id)
+        await ctx.send(f"✅ Age gate verifier role set to {role.mention}")
+        await ctx.tick()
+
     @verify_config.command(name="invalidategone")
     @checks.admin_or_permissions(administrator=True)
     async def invalidate_gone_users(self, ctx):
@@ -1608,6 +1678,18 @@ class CkeyTools(commands.Cog):
         embed.add_field(
             name="🔐 Ticket Permissions",
             value=f"Staff Roles: {staff_role_count}\nDefault Perms: {default_perm_count}\nStaff Perms: {staff_perm_count}\nOpener Perms: {opener_perm_count}",
+            inline=True
+        )
+
+        # Age gate system status
+        agegate_enabled = conf["agegate_enabled"]
+        agegate_embed_configured = bool(conf["agegate_embed"])
+        agegate_verifier_role_id = conf["agegate_verifier_role"]
+        agegate_verifier_role = ctx.guild.get_role(agegate_verifier_role_id) if agegate_verifier_role_id else None
+
+        embed.add_field(
+            name="🚪 Age Gate System",
+            value=f"Enabled: {'✅ Yes' if agegate_enabled else '❌ No'}\nEmbed: {'✅ Configured' if agegate_embed_configured else '❌ Not set'}\nVerifier Role: {agegate_verifier_role.mention if agegate_verifier_role else '❌ Not set'}",
             inline=True
         )
 
@@ -1800,6 +1882,131 @@ class CkeyTools(commands.Cog):
                 self.log.error(f"Error getting Discord accounts for ckey {ckey}: {e}")
                 await message.edit(content="❌ Error retrieving Discord account history.")
 
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.hybrid_command(name="agegateconfirm", description="Confirm age verification in a verification ticket")
+    async def agegate_confirm(self, ctx: commands.Context, *, date_of_birth: str):
+        """
+        Confirm age verification in a verification ticket.
+
+        This command infers the user from the ticket channel and creates/updates their age verification record.
+
+        Date formats supported:
+        - YYYY-MM-DD (2000-01-01)
+        - MM/DD/YYYY (01/01/2000)
+        - DD/MM/YYYY (01/01/2000)
+        - January 1, 2000
+        - And many other common formats
+
+        Examples:
+        `[p]agegateconfirm 2000-01-01`
+        `[p]agegateconfirm 01/01/2000`
+        `[p]agegateconfirm "January 1, 2000"`
+        """
+        if not ctx.guild:
+            await ctx.send("❌ This command must be used in a guild.")
+            return
+
+        # Must be used in a text channel
+        if not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.send("❌ This command must be used in a text channel.")
+            return
+
+        channel = ctx.channel
+
+        # Check if age gate is enabled
+        agegate_enabled = await self.config.guild(ctx.guild).agegate_enabled()
+        if not agegate_enabled:
+            await ctx.send("❌ Age gate system is not enabled.")
+            return
+
+        # Find the ticket opener
+        opener = await self._find_ticket_opener(ctx.guild, channel)
+        if not opener:
+            await ctx.send("❌ This channel is not recognized as a verification ticket.")
+            return
+
+        # Check if user has submitted an image (agegate_pending)
+        agegate_pending = await self.config.member(opener).agegate_pending()
+        if not agegate_pending:
+            await ctx.send("❌ No age verification image has been submitted yet in this ticket.")
+            return
+
+        # Check if database is connected
+        if not self.db_manager.is_connected(ctx.guild.id):
+            await ctx.send("❌ Database is not connected. Please configure the database connection first.")
+            return
+
+        # Check if API is configured
+        try:
+            await self._get_agevet_headers(ctx.guild)
+            await self._get_agevet_url(ctx.guild)
+        except ValueError as e:
+            await ctx.send(f"❌ Age verification API not configured: {e}")
+            return
+
+        async with ctx.typing():
+            try:
+                # Get user's ckey from database
+                link = await self.db_manager.get_valid_link_by_discord_id(ctx.guild.id, opener.id)
+                if not link:
+                    await ctx.send(f"❌ User {opener.mention} is not verified with a ckey. They must verify their Discord account first.")
+                    return
+
+                ckey = link.ckey
+                self.log.info(f"Confirming age verification for user {opener} ({opener.id}) with ckey {ckey}")
+
+                # Parse date of birth
+                try:
+                    dob = self._parse_date_of_birth(date_of_birth)
+                except ValueError as e:
+                    await ctx.send(f"❌ Invalid date format: {e}")
+                    return
+
+                # Check if user is already age vetted
+                existing_record = await self.get_agevet_record(ctx.guild, ckey)
+
+                if existing_record:
+                    # Update existing record
+                    await self.update_agevet_record(ctx.guild, ckey, dob)
+                    action = "updated"
+                    self.log.info(f"Updated age vetting record for {opener} ({ckey}) with DOB {dob}")
+                else:
+                    # Create new record
+                    await self.create_agevet_record(ctx.guild, ckey, dob)
+                    action = "created"
+                    self.log.info(f"Created age vetting record for {opener} ({ckey}) with DOB {dob}")
+
+                # Assign agevet role
+                role_assigned = await self._assign_agevet_role(ctx.guild, opener)
+
+                # Send success message
+                embed = discord.Embed(
+                    title="Age Verification Confirmed",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(name="User", value=f"{opener.mention} ({opener.display_name})", inline=True)
+                embed.add_field(name="Ckey", value=f"`{ckey}`", inline=True)
+                embed.add_field(name="Date of Birth", value=dob.strftime("%B %d, %Y"), inline=True)
+                embed.add_field(name="Record", value=f"✅ {action.title()}", inline=True)
+                embed.add_field(name="Role", value="✅ Assigned" if role_assigned else "❌ Not configured", inline=True)
+
+                embed.set_thumbnail(url=opener.display_avatar.url)
+                embed.set_footer(text=f"Age verification confirmed by {ctx.author.display_name}")
+
+                await ctx.send(embed=embed)
+
+                # Complete verification and close ticket
+                await self.finish_verification(ctx.guild, opener, ckey, ticket_channel=channel)
+                await ctx.tick()
+
+            except ValueError as e:
+                await ctx.send(f"❌ {e}")
+            except Exception as e:
+                self.log.error(f"Error during age gate confirmation for {opener}: {e}")
+                await ctx.send(f"❌ An error occurred during age verification confirmation: {e}")
+
     @commands.command()
     @commands.guild_only()
     async def deverify(self, ctx: commands.Context, user: Optional[discord.Member] = None):
@@ -1915,7 +2122,7 @@ class CkeyTools(commands.Cog):
             return False
 
     async def ensure_user_roles(self, guild, user):
-        """Ensure a verified user has the correct roles."""
+        """Ensure a verified user has the correct roles (excluding agevet role, which is handled separately)."""
         try:
             verification_roles = await self.config.guild(guild).verification_roles()
             if not verification_roles:
@@ -1925,8 +2132,15 @@ class CkeyTools(commands.Cog):
             if not member:
                 return
 
+            # Get the agevet role ID to exclude it from verification_roles
+            # The agevet role should ONLY be assigned through _check_and_assign_agevet_role
+            agevet_role_id = await self.config.guild(guild).agevet_role()
+
             roles_to_add = []
             for role_id in verification_roles:
+                # Skip the agevet role - it should only be assigned through proper verification
+                if agevet_role_id and role_id == agevet_role_id:
+                    continue
                 role = guild.get_role(role_id)
                 if role and role not in member.roles:
                     roles_to_add.append(role)
@@ -2077,15 +2291,45 @@ class CkeyTools(commands.Cog):
             # No channel or DM context provided
             return False, None
 
-    async def finish_verification(self, guild, user, ckey, ticket_channel=None, dm_channel=None):
-        """Assign roles, send confirmation, and close the ticket if needed."""
+    async def finish_discord_verification(self, guild, user, ckey, ticket_channel=None):
+        """Complete Discord verification step and proceed to age gate if needed."""
         # Remove user from deverified list if they were there
         deverified_users = await self.config.guild(guild).deverified_users()
         if user.id in deverified_users:
             deverified_users.remove(user.id)
             await self.config.guild(guild).deverified_users.set(deverified_users)
 
-        # Assign roles using the comprehensive helper function (includes agevet check)
+        # Apply Discord verification roles (but not agevet role yet)
+        await self.ensure_user_roles(guild, user)
+
+        # Mark Discord verification as complete
+        await self.config.member(user).discord_verified.set(True)
+
+        if ticket_channel:
+            # Check if age gate is enabled and if user needs age verification
+            agegate_enabled = await self.config.guild(guild).agegate_enabled()
+            if agegate_enabled:
+                # Check if user is already age vetted
+                agevet_record = None
+                try:
+                    agevet_record = await self.get_agevet_record(guild, ckey)
+                except Exception as e:
+                    self.log.warning(f"Error checking agevet record for {ckey}: {e}")
+                if agevet_record:
+                    # User is already age vetted, proceed to finish everything
+                    await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+                    return
+                else:
+                    # User needs age verification, proceed to age gate step
+                    await self.start_agegate_step(guild, user, ckey, ticket_channel)
+                    return
+
+        # Age gate not enabled, finish verification normally
+        await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+
+    async def finish_verification(self, guild, user, ckey, ticket_channel=None, dm_channel=None):
+        """Complete full verification (both Discord and age gate if applicable) and close ticket."""
+        # Apply all roles including agevet if applicable
         await self.ensure_user_roles_with_agevet(guild, user, ckey)
 
         # Send comprehensive DM embed to user
@@ -2102,6 +2346,8 @@ class CkeyTools(commands.Cog):
             except Exception:
                 pass
             await self.config.member(user).open_ticket.clear()
+            await self.config.member(user).discord_verified.clear()
+            await self.config.member(user).agegate_pending.clear()
         # For DMs, the comprehensive embed is sufficient, no need for additional message
 
     async def send_verification_success_dm(self, guild, user, ckey):
@@ -2276,6 +2522,18 @@ class CkeyTools(commands.Cog):
         view = VerificationCodeView(self, user, ticket_channel.guild)
         await ticket_channel.send(f"{user.mention}", embed=embed, view=view)
 
+    async def start_agegate_step(self, guild, user, ckey, ticket_channel):
+        """Start the age gate verification step in the ticket."""
+        agegate_embed_data = await self.config.guild(guild).agegate_embed()
+        if not agegate_embed_data:
+            # No agegate embed configured, skip age gate
+            await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+            return
+
+        embed = discord.Embed.from_dict(agegate_embed_data)
+        msg = await ticket_channel.send(f"{user.mention}", embed=embed)
+        self.log.info(f"Started age gate step for user {user} ({ckey}) in ticket {ticket_channel.id}")
+
     async def verify_code(self, guild, user, code):
         """Check if the code matches a valid, unlinked one_time_token in the database."""
         if not self.db_manager.is_connected(guild.id):
@@ -2306,20 +2564,60 @@ class CkeyTools(commands.Cog):
                 reason=f"Verification ticket for {user}"
             )
             await self.config.member(user).open_ticket.set(ticket_channel.id)
+            # Reset verification state flags
+            await self.config.member(user).discord_verified.set(False)
+            await self.config.member(user).agegate_pending.set(False)
             # Set channel topic with opener id for convenience (best-effort)
             try:
                 await ticket_channel.edit(topic=f"Verification ticket • opener_id={user.id}")
             except Exception:
                 pass
-            # Attempt auto-verification
-            auto_verified, ckey = await self.try_auto_verification(guild, user, channel=ticket_channel, dm=False)
-            if auto_verified:
-                await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
-                await interaction.response.send_message(
-                    f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
-                )
-                return
-            # If not auto-verified, send the ticket embed with button
+            # Check if user is already verified with Discord link
+            valid_link = await self.fetch_valid_discord_link(guild, user.id) if self.db_manager.is_connected(guild.id) else None
+            if valid_link:
+                ckey = valid_link.get('ckey')
+                # User is already Discord verified, check age gate
+                agegate_enabled = await self.config.guild(guild).agegate_enabled()
+                if agegate_enabled:
+                    # Check if user is age vetted
+                    agevet_record = None
+                    try:
+                        agevet_record = await self.get_agevet_record(guild, ckey)
+                    except Exception as e:
+                        self.log.warning(f"Error checking agevet record for {ckey}: {e}")
+                    if agevet_record:
+                        # Both verified, finish immediately
+                        await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+                        await interaction.response.send_message(
+                            f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
+                        )
+                        return
+                    else:
+                        # Discord verified but not age vetted, go to age gate step
+                        await self.config.member(user).discord_verified.set(True)
+                        await self.ensure_user_roles(guild, user)
+                        await self.start_agegate_step(guild, user, ckey, ticket_channel)
+                        await interaction.response.send_message(
+                            f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
+                        )
+                        return
+                else:
+                    # Age gate not enabled, finish normally
+                    await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+                    await interaction.response.send_message(
+                        f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
+                    )
+                    return
+            else:
+                # User is not Discord verified, attempt auto-verification
+                auto_verified, ckey = await self.try_auto_verification(guild, user, channel=ticket_channel, dm=False)
+                if auto_verified:
+                    await self.finish_discord_verification(guild, user, ckey, ticket_channel=ticket_channel)
+                    await interaction.response.send_message(
+                        f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
+                    )
+                    return
+            # If not auto-verified, send the ticket embed with button for Discord verification
             ticket_embed = await self.config.guild(guild).ticket_embed()
             await self.send_verification_prompt(user, ticket_channel, ticket_embed)
             await interaction.response.send_message(
@@ -2498,10 +2796,13 @@ class CkeyTools(commands.Cog):
 
         # Cleanup mappings
         try:
-            # Clear member's open_ticket
+            # Clear member's open_ticket and verification flags
             try:
                 if opener_id is not None:
-                    await self.config.member_from_ids(guild.id, opener_id).open_ticket.clear()
+                    member_config = self.config.member_from_ids(guild.id, opener_id)
+                    await member_config.open_ticket.clear()
+                    await member_config.discord_verified.clear()
+                    await member_config.agegate_pending.clear()
             except Exception:
                 pass
         except Exception:
@@ -2546,6 +2847,87 @@ class CkeyTools(commands.Cog):
                     self.log.info(f"Invalidated {affected_rows} verification link(s) for {member} ({member.id}) who left {guild.name}")
             except Exception as e:
                 self.log.error(f"Failed to invalidate verification for {member} who left {guild.name}: {e}")
+
+    async def _find_ticket_opener(self, guild, channel):
+        """Find the user who opened a verification ticket."""
+        opener_id = None
+        try:
+            for member in guild.members:
+                try:
+                    user_open = await self.config.member(member).open_ticket()
+                    if user_open == channel.id:
+                        opener_id = member.id
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return guild.get_member(opener_id) if opener_id else None
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Handle image uploads in verification tickets for age gate."""
+        # Ignore bot messages
+        if message.author.bot:
+            return
+
+        # Only process messages in guild channels
+        if not isinstance(message.channel, discord.TextChannel) or not message.guild:
+            return
+
+        guild = message.guild
+        channel = message.channel
+
+        # Check if age gate is enabled
+        agegate_enabled = await self.config.guild(guild).agegate_enabled()
+        if not agegate_enabled:
+            return
+
+        # Check if this is a verification ticket
+        opener = await self._find_ticket_opener(guild, channel)
+        if not opener:
+            return
+
+        # Check if user is waiting for age gate step (Discord verified but age gate pending)
+        discord_verified = await self.config.member(opener).discord_verified()
+        agegate_pending = await self.config.member(opener).agegate_pending()
+
+        # Only process if Discord is verified and age gate is not yet pending
+        if not discord_verified or agegate_pending:
+            return
+
+        # Check if message has attachments (images)
+        if not message.attachments:
+            return
+
+        # Check if any attachment is an image
+        has_image = any(
+            att.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
+            for att in message.attachments
+        )
+
+        if not has_image:
+            return
+
+        # Mark age gate as pending
+        await self.config.member(opener).agegate_pending.set(True)
+
+        # Get verifier role
+        verifier_role_id = await self.config.guild(guild).agegate_verifier_role()
+        verifier_mention = ""
+        if verifier_role_id:
+            verifier_role = guild.get_role(verifier_role_id)
+            if verifier_role:
+                verifier_mention = f"{verifier_role.mention} "
+
+        # Send acknowledgment message
+        await channel.send(
+            f"✅ Thank you for submitting your age verification image, {opener.mention}!\n\n"
+            f"{verifier_mention}Please wait for a staff member to verify your age verification. "
+            f"A moderator will review your submission shortly."
+        )
+
+        self.log.info(f"Age gate image submitted by {opener} ({opener.id}) in ticket {channel.id}")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -3938,8 +4320,8 @@ class VerificationCodeModal(discord.ui.Modal, title="Enter Verification Code"):
         # Try to verify the code
         verified, ckey = await self.cog.verify_code(self.guild, self.user, self.code.value)
         if verified:
-            await self.cog.finish_verification(self.guild, self.user, ckey, ticket_channel=self.ticket_channel)
-            await interaction.response.send_message(f"Verification successful! Welcome, `{ckey}`.", ephemeral=True)
+            await self.cog.finish_discord_verification(self.guild, self.user, ckey, ticket_channel=self.ticket_channel)
+            await interaction.response.send_message(f"Discord verification successful! Welcome, `{ckey}`.", ephemeral=True)
             self.stop()
         else:
             await interaction.response.send_message(
