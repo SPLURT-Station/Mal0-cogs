@@ -2193,8 +2193,112 @@ class CkeyTools(commands.Cog):
             self.log.error(f"Error creating auto link for {ckey} and discord_id {discord_id}: {e}")
             raise
 
+    async def try_auto_verify_discord(self, guild, user, channel=None, dm=False):
+        """Attempt to auto-verify Discord link only (does not check age vet).
+        If channel is provided, send messages there. If dm=True, send DMs to the user.
+        Returns (success: bool, ckey: str or None)
+        """
+        # First check if user is already verified
+        is_verified = await self.is_user_verified(guild, user)
+        if is_verified:
+            self.log.info(f"User {user} is already Discord verified, skipping auto-verification")
+
+            # Get their ckey for the message and role assignment
+            try:
+                valid_link = await self.fetch_valid_discord_link(guild, user.id)
+                ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
+
+                # Apply Discord verification roles (but not agevet role)
+                await self.ensure_user_roles(guild, user)
+
+                if channel:
+                    await channel.send(f"You are already Discord verified as `{ckey}`. Your roles have been updated if needed.")
+                elif dm:
+                    # For DMs, just send a simple message since they're already verified
+                    try:
+                        dm_channel = user.dm_channel or await user.create_dm()
+                        await dm_channel.send(f"Your Discord account is already linked to `{ckey}`.")
+                    except Exception:
+                        pass
+
+                return True, ckey
+            except Exception as e:
+                self.log.error(f"Error handling already verified user {user}: {e}")
+                return False, None
+
+        # Check if auto-verification is enabled
+        autoverification_enabled = await self.config.guild(guild).autoverification_enabled()
+
+        # Check if user has been manually deverified
+        deverified_users = await self.config.guild(guild).deverified_users()
+        user_is_deverified = user.id in deverified_users
+
+        if not autoverification_enabled or user_is_deverified:
+            # Auto-verification is disabled or user is deverified, simulate as if no link was found
+            link = None
+        else:
+            link = await self.fetch_latest_discord_link(guild, user.id)
+
+        if channel:
+            msg = await channel.send("Attempting to auto verify Discord link...")
+            async with channel.typing():
+                if link:
+                    ckey = link["ckey"]
+                    original_token = link["one_time_token"]
+                    new_token = await self.create_auto_link(guild, ckey, user.id, original_token)
+                    await msg.edit(content=f"Automatic Discord verification completed! Welcome back, `{ckey}`.")
+                    return True, ckey
+                else:
+                    await msg.delete()
+                    return False, None
+        elif dm:
+            try:
+                dm_channel = user.dm_channel or await user.create_dm()
+                typing_ctx = dm_channel.typing() if hasattr(dm_channel, 'typing') else None
+                if typing_ctx:
+                    await typing_ctx.__aenter__()
+                dm_message = await dm_channel.send("Attempting to auto verify Discord link...")
+                if link:
+                    ckey = link["ckey"]
+                    original_token = link["one_time_token"]
+                    new_token = await self.create_auto_link(guild, ckey, user.id, original_token)
+                    await dm_message.delete()
+                    if typing_ctx:
+                        await typing_ctx.__aexit__(None, None, None)
+                    return True, ckey
+                else:
+                    # Fetch panel channel and message link
+                    panel_channel_id = await self.config.guild(guild).ticket_channel()
+                    panel_message_id = await self.config.guild(guild).panel_message()
+                    panel_channel = guild.get_channel(panel_channel_id) if panel_channel_id else None
+                    panel_channel_mention = panel_channel.mention if panel_channel else "the verification panel channel"
+                    panel_message_link = None
+                    if panel_channel_id and panel_message_id:
+                        panel_message_link = f"https://discord.com/channels/{guild.id}/{panel_channel_id}/{panel_message_id}"
+
+                    if user_is_deverified:
+                        msg = f"You have been manually deverified and cannot auto-verify. Please use the verification panel at {panel_channel_mention} to verify with a new ckey."
+                    elif not autoverification_enabled:
+                        msg = f"Auto-verification is currently disabled. Please use the verification panel at {panel_channel_mention} to verify manually."
+                    else:
+                        msg = f"It seems you have no Discord account linked. Please make sure to link your discord account to your ckey at {panel_channel_mention} in order to verify!"
+
+                    if panel_message_link:
+                        msg += f"\n<{panel_message_link}>"
+                    await dm_message.edit(content=msg)
+                    if typing_ctx:
+                        await typing_ctx.__aexit__(None, None, None)
+                    return False, None
+            except Exception as e:
+                self.log.warning(f"Failed to DM user {user}: {e}")
+                return False, None
+        else:
+            # No channel or DM context provided
+            return False, None
+
     async def try_auto_verification(self, guild, user, channel=None, dm=False):
         """Attempt to auto-verify a user based on previous discord_links.
+        DEPRECATED: Use try_auto_verify_discord instead. This function is kept for backward compatibility.
         If channel is provided, send messages there. If dm=True, send DMs to the user.
         Returns (success: bool, ckey: str or None)
         """
@@ -2293,6 +2397,24 @@ class CkeyTools(commands.Cog):
             # No channel or DM context provided
             return False, None
 
+    async def try_auto_verify_agevet(self, guild, user, ckey):
+        """Attempt to auto-verify age vet for a user if they have an agevet record.
+        Returns (success: bool) - True if user has agevet record, False otherwise.
+        """
+        if not self.db_manager.is_connected(guild.id):
+            return False
+
+        try:
+            agevet_record = await self.get_agevet_record(guild, ckey)
+            if agevet_record:
+                # User has agevet record, assign the role
+                await self._assign_agevet_role(guild, user)
+                return True
+            return False
+        except Exception as e:
+            self.log.warning(f"Error checking agevet record for {ckey}: {e}")
+            return False
+
     async def finish_discord_verification(self, guild, user, ckey, ticket_channel=None):
         """Complete Discord verification step and proceed to age gate if needed."""
         # Remove user from deverified list if they were there
@@ -2308,21 +2430,17 @@ class CkeyTools(commands.Cog):
         await self.config.member(user).discord_verified.set(True)
 
         if ticket_channel:
-            # Check if age gate is enabled and if user needs age verification
+            # Check if age gate is enabled
             agegate_enabled = await self.config.guild(guild).agegate_enabled()
             if agegate_enabled:
-                # Check if user is already age vetted
-                agevet_record = None
-                try:
-                    agevet_record = await self.get_agevet_record(guild, ckey)
-                except Exception as e:
-                    self.log.warning(f"Error checking agevet record for {ckey}: {e}")
-                if agevet_record:
-                    # User is already age vetted, proceed to finish everything
+                # Try to autoverify age gate first
+                agevet_auto_verified = await self.try_auto_verify_agevet(guild, user, ckey)
+                if agevet_auto_verified:
+                    # Age vet autoverified, finish verification
                     await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
                     return
                 else:
-                    # User needs age verification, proceed to age gate step
+                    # Age vet not autoverified, proceed to age gate step
                     await self.start_agegate_step(guild, user, ckey, ticket_channel)
                     return
 
@@ -2565,6 +2683,14 @@ class CkeyTools(commands.Cog):
 
     async def start_agegate_step(self, guild, user, ckey, ticket_channel):
         """Start the age gate verification step in the ticket."""
+        # First try to autoverify age gate
+        agevet_auto_verified = await self.try_auto_verify_agevet(guild, user, ckey)
+        if agevet_auto_verified:
+            # Age vet autoverified, finish verification
+            await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+            return
+
+        # Age vet not autoverified, send age gate embed
         agegate_embed_data = await self.config.guild(guild).agegate_embed()
         if not agegate_embed_data:
             # No agegate embed configured, skip age gate
@@ -2617,57 +2743,50 @@ class CkeyTools(commands.Cog):
                 await ticket_channel.edit(topic=f"Verification ticket • opener_id={user.id}")
             except Exception:
                 pass
-            # Check if user is already verified with Discord link
-            valid_link = await self.fetch_valid_discord_link(guild, user.id) if self.db_manager.is_connected(guild.id) else None
-            if valid_link:
-                ckey = valid_link.get('ckey')
-                # User is already Discord verified, check age gate
-                agegate_enabled = await self.config.guild(guild).agegate_enabled()
-                if agegate_enabled:
-                    # Check if user is age vetted
-                    agevet_record = None
-                    try:
-                        agevet_record = await self.get_agevet_record(guild, ckey)
-                    except Exception as e:
-                        self.log.warning(f"Error checking agevet record for {ckey}: {e}")
-                    if agevet_record:
-                        # Both verified, finish immediately
-                        await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
-                        await interaction.response.send_message(
-                            f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
-                        )
-                        return
-                    else:
-                        # Discord verified but not age vetted, go to age gate step
-                        await self.config.member(user).discord_verified.set(True)
-                        await self.ensure_user_roles(guild, user)
-                        await self.start_agegate_step(guild, user, ckey, ticket_channel)
-                        await interaction.response.send_message(
-                            f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
-                        )
-                        return
-                else:
-                    # Age gate not enabled, finish normally
-                    await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
-                    await interaction.response.send_message(
-                        f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
-                    )
-                    return
+
+            # Step 1: Try to autoverify Discord first
+            discord_verified, ckey = await self.try_auto_verify_discord(guild, user, channel=ticket_channel, dm=False)
+
+            if discord_verified and ckey:
+                # Discord autoverified, apply Discord roles and mention that ckey is correctly linked
+                await self.config.member(user).discord_verified.set(True)
+                await self.ensure_user_roles(guild, user)
+                await ticket_channel.send(f"✅ Your ckey `{ckey}` is correctly linked to your Discord account.")
             else:
-                # User is not Discord verified, attempt auto-verification
-                auto_verified, ckey = await self.try_auto_verification(guild, user, channel=ticket_channel, dm=False)
-                if auto_verified:
-                    await self.finish_discord_verification(guild, user, ckey, ticket_channel=ticket_channel)
-                    await interaction.response.send_message(
-                        f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
-                    )
-                    return
-            # If not auto-verified, send the ticket embed with button for Discord verification
-            ticket_embed = await self.config.guild(guild).ticket_embed()
-            await self.send_verification_prompt(user, ticket_channel, ticket_embed)
-            await interaction.response.send_message(
-                f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
-            )
+                # Discord not autoverified, send Discord verification prompt
+                ticket_embed = await self.config.guild(guild).ticket_embed()
+                await self.send_verification_prompt(user, ticket_channel, ticket_embed)
+                await interaction.response.send_message(
+                    f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
+                )
+                return  # Exit early, user needs to complete Discord verification first
+
+            # Step 2: Check if age gate is enabled
+            agegate_enabled = await self.config.guild(guild).agegate_enabled()
+            if not agegate_enabled:
+                # Age gate not enabled, close ticket after Discord verification
+                await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+                await interaction.response.send_message(
+                    f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
+                )
+                return
+
+            # Step 3: Age gate is enabled, try to autoverify age gate
+            agevet_auto_verified = await self.try_auto_verify_agevet(guild, user, ckey)
+            if agevet_auto_verified:
+                # Age vet autoverified, finish verification
+                await self.finish_verification(guild, user, ckey, ticket_channel=ticket_channel)
+                await interaction.response.send_message(
+                    f"✅ Automatic verification completed! Welcome, `{ckey}`.", ephemeral=True
+                )
+                return
+            else:
+                # Age vet not autoverified, proceed to age gate step
+                await self.start_agegate_step(guild, user, ckey, ticket_channel)
+                await interaction.response.send_message(
+                    f"✅ Verification ticket created: {ticket_channel.mention}", ephemeral=True
+                )
+                return
         except Exception as e:
             self.log.error(f"Error creating verification ticket: {e}")
             await interaction.response.send_message(
@@ -2992,24 +3111,24 @@ class CkeyTools(commands.Cog):
         if not all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
             return
 
-        # Try auto-verification and DM the user
-        auto_verified, ckey = await self.try_auto_verification(guild, member, channel=None, dm=True)
-        if auto_verified:
-            # Auto-verification succeeded, now assign roles
+        # Step 1: Try auto-verify Discord link
+        discord_verified, ckey = await self.try_auto_verify_discord(guild, member, channel=None, dm=True)
+        if discord_verified:
+            # Discord verified, apply Discord roles
+            await self.ensure_user_roles(guild, member)
+
+            # Step 2: If Discord is correctly linked, try to auto-agevet if configured
+            if ckey and conf.get("agevet_enabled", False):
+                agevet_auto_verified = await self.try_auto_verify_agevet(guild, member, ckey)
+                if agevet_auto_verified:
+                    self.log.info(f"Auto-verified age vet for {member} ({ckey}) on join")
+
+            # Send success DM
             try:
                 dm_channel = member.dm_channel or await member.create_dm()
-                await self.finish_verification(guild, member, ckey, dm_channel=dm_channel)
+                await self.send_verification_success_dm(guild, member, ckey)
             except Exception as e:
-                self.log.warning(f"Failed to complete auto-verification for {member}: {e}")
-                # Still assign roles even if DM fails
-                role_ids = await self.config.guild(guild).verification_roles()
-                roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
-                valid_roles = [role for role in roles if role is not None]
-                try:
-                    if valid_roles:
-                        await member.add_roles(*valid_roles, reason="SS13 auto-verification successful")
-                except Exception as role_e:
-                    self.log.error(f"Failed to assign roles to {member} during auto-verification: {role_e}")
+                self.log.warning(f"Failed to send DM to {member}: {e}")
 
     # =========================
     # autoroles (ckey list → TOML)
