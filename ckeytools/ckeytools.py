@@ -94,7 +94,10 @@ class CkeyTools(commands.Cog):
         self.config.register_member(**default_member)
 
     async def cog_load(self):
-        # First, connect to databases for all guilds with config
+        # Wait for bot to be ready before connecting to databases
+        await self.bot.wait_until_ready()
+
+        # Connect to databases for all guilds with config
         for guild in self.bot.guilds:
             conf = await self.config.guild(guild).all()
             if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
@@ -2296,107 +2299,6 @@ class CkeyTools(commands.Cog):
             # No channel or DM context provided
             return False, None
 
-    async def try_auto_verification(self, guild, user, channel=None, dm=False):
-        """Attempt to auto-verify a user based on previous discord_links.
-        DEPRECATED: Use try_auto_verify_discord instead. This function is kept for backward compatibility.
-        If channel is provided, send messages there. If dm=True, send DMs to the user.
-        Returns (success: bool, ckey: str or None)
-        """
-        # First check if user is already verified
-        is_verified = await self.is_user_verified(guild, user)
-        if is_verified:
-            self.log.info(f"User {user} is already verified, skipping auto-verification")
-
-            # Get their ckey for the message and role assignment
-            try:
-                valid_link = await self.fetch_valid_discord_link(guild, user.id)
-                ckey = valid_link.get('ckey', 'Unknown') if valid_link else 'Unknown'
-
-                # Ensure they have roles including agevet role if applicable
-                await self.ensure_user_roles_with_agevet(guild, user, ckey)
-
-                if channel:
-                    await channel.send(f"You are already verified as `{ckey}`. Your roles have been updated if needed.")
-                elif dm:
-                    # For DMs, just send the success embed directly since they're already verified
-                    await self.send_verification_success_dm(guild, user, ckey)
-
-                return True, ckey
-            except Exception as e:
-                self.log.error(f"Error handling already verified user {user}: {e}")
-                return False, None
-
-        # Check if auto-verification is enabled
-        autoverification_enabled = await self.config.guild(guild).autoverification_enabled()
-
-        # Check if user has been manually deverified
-        deverified_users = await self.config.guild(guild).deverified_users()
-        user_is_deverified = user.id in deverified_users
-
-        if not autoverification_enabled or user_is_deverified:
-            # Auto-verification is disabled or user is deverified, simulate as if no link was found
-            link = None
-        else:
-            link = await self.fetch_latest_discord_link(guild, user.id)
-
-        if channel:
-            msg = await channel.send("Attempting to auto verify...")
-            async with channel.typing():
-                if link:
-                    ckey = link["ckey"]
-                    original_token = link["one_time_token"]
-                    new_token = await self.create_auto_link(guild, ckey, user.id, original_token)
-                    await msg.edit(content=f"Automatic verification completed! Welcome back, `{ckey}`.")
-                    return True, ckey
-                else:
-                    await msg.delete()
-                    return False, None
-        elif dm:
-            try:
-                dm_channel = user.dm_channel or await user.create_dm()
-                typing_ctx = dm_channel.typing() if hasattr(dm_channel, 'typing') else None
-                if typing_ctx:
-                    await typing_ctx.__aenter__()
-                dm_message = await dm_channel.send("Attempting to auto verify...")
-                if link:
-                    ckey = link["ckey"]
-                    original_token = link["one_time_token"]
-                    new_token = await self.create_auto_link(guild, ckey, user.id, original_token)
-                    # Delete the "attempting" message since finish_verification will send the success DM embed
-                    await dm_message.delete()
-                    if typing_ctx:
-                        await typing_ctx.__aexit__(None, None, None)
-                    return True, ckey
-                else:
-                    # Fetch panel channel and message link
-                    panel_channel_id = await self.config.guild(guild).ticket_channel()
-                    panel_message_id = await self.config.guild(guild).panel_message()
-                    panel_channel = guild.get_channel(panel_channel_id) if panel_channel_id else None
-                    panel_channel_mention = panel_channel.mention if panel_channel else "the verification panel channel"
-                    panel_message_link = None
-                    if panel_channel_id and panel_message_id:
-                        panel_message_link = f"https://discord.com/channels/{guild.id}/{panel_channel_id}/{panel_message_id}"
-
-                    if user_is_deverified:
-                        msg = f"You have been manually deverified and cannot auto-verify. Please use the verification panel at {panel_channel_mention} to verify with a new ckey."
-                    elif not autoverification_enabled:
-                        msg = f"Auto-verification is currently disabled. Please use the verification panel at {panel_channel_mention} to verify manually."
-                    else:
-                        msg = f"It seems you have no account linked. Please make sure to link your discord account to your ckey at {panel_channel_mention} in order to verify!"
-
-                    if panel_message_link:
-                        msg += f"\n<{panel_message_link}>"
-                    await dm_message.edit(content=msg)
-                    if typing_ctx:
-                        await typing_ctx.__aexit__(None, None, None)
-                    return False, None
-            except Exception as e:
-                self.log.warning(f"Failed to DM user {user}: {e}")
-                return False, None
-        else:
-            # No channel or DM context provided
-            return False, None
-
     async def try_auto_verify_agevet(self, guild, user, ckey):
         """Attempt to auto-verify age vet for a user if they have an agevet record.
         Returns (success: bool) - True if user has agevet record, False otherwise.
@@ -3413,6 +3315,11 @@ class CkeyTools(commands.Cog):
 
     async def rebuild_autoroles_file(self, guild: discord.Guild):
         """Rebuild the TOML file from role→path mappings."""
+        # Skip if database is not connected to prevent writing blank files
+        if not self.db_manager.is_connected(guild.id):
+            self.log.debug(f"Skipping autoroles file rebuild for {guild.name} - database not connected")
+            return
+
         conf = await self.config.guild(guild).all()
         folder = conf.get("autoroles_config_folder")
         file_name = conf.get("autoroles_file_name") or "donator.toml"
