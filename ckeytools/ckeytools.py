@@ -94,16 +94,7 @@ class CkeyTools(commands.Cog):
         self.config.register_member(**default_member)
 
     async def cog_load(self):
-        # Wait for bot to be ready before connecting to databases
-        await self.bot.wait_until_ready()
-
-        # Connect to databases for all guilds with config
-        for guild in self.bot.guilds:
-            conf = await self.config.guild(guild).all()
-            if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
-                await self.reconnect_database(guild)
-
-        # Then add persistent views back to the bot so buttons work after reload
+        # Add persistent views back to the bot so buttons work after reload
         try:
             self.bot.add_view(VerificationButtonView(self))
             self.bot.add_view(VerificationCodeView(self, None, None))  # Generic view for handling all verify_code_button interactions
@@ -117,6 +108,24 @@ class CkeyTools(commands.Cog):
                 self.autoroles_update.start()
         except Exception as e:
             self.log.error(f"Failed to start autoroles updater: {e}")
+
+        # Connect to databases after a delay to allow config to load
+        asyncio.create_task(self._delayed_database_connections())
+
+    async def _delayed_database_connections(self):
+        """Connect to databases after a delay to ensure config is loaded."""
+        # Wait for bot to be ready and give config time to load
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)  # Additional delay to ensure config is fully loaded
+
+        # Connect to databases for all guilds with config
+        for guild in self.bot.guilds:
+            try:
+                conf = await self.config.guild(guild).all()
+                if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
+                    await self.reconnect_database(guild)
+            except Exception as e:
+                self.log.error(f"Failed to connect database for guild {guild.name} during delayed initialization: {e}")
 
     async def cog_unload(self):
         # Close all database connections when cog is unloaded
