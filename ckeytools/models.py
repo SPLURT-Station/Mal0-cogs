@@ -1,14 +1,14 @@
 """
 SQLAlchemy models for CkeyTools cog.
 """
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
 
-from sqlalchemy import Column, Integer, String, BigInteger, DateTime, Boolean, Text
+from sqlalchemy import Column, Integer, String, BigInteger, DateTime, Boolean, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 
 Base = declarative_base()
+AgeVetBase = declarative_base()
 
 
 class DiscordLink(Base):
@@ -52,6 +52,32 @@ class DiscordLink(Base):
             one_time_token=data.get('one_time_token'),
             valid=data.get('valid', False)
         )
+
+
+class AgeVet(AgeVetBase):
+    """
+    Age vetting model matching BackgroundCheck's bc_vetting.AgeVet table.
+
+    Django default table name is ``bc_vetting_agevet``. Stores ckey + DOB only.
+    """
+    __tablename__ = 'bc_vetting_agevet'
+
+    ckey = Column(String(100), primary_key=True)
+    date_of_birth = Column(Date, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=func.current_timestamp())
+
+    def __repr__(self):
+        return f"<AgeVet(ckey='{self.ckey}', date_of_birth={self.date_of_birth})>"
+
+    def to_dict(self):
+        """Serialize to the same shape previously returned by the BackgroundCheck API."""
+        dob = self.date_of_birth
+        created = self.created_at
+        return {
+            'ckey': self.ckey,
+            'date_of_birth': dob.isoformat() if isinstance(dob, date) else dob,
+            'created_at': created.isoformat() if isinstance(created, datetime) else created,
+        }
 
 
 def get_table_name_with_prefix(prefix: str) -> str:

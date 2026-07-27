@@ -2,15 +2,16 @@
 Database manager for CkeyTools cog using SQLAlchemy.
 """
 import logging
+from datetime import date
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
 
-from sqlalchemy import create_engine, select, update, delete, func, and_, or_
+from sqlalchemy import select, update, and_, or_
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError
 
-from .models import DiscordLink, Base, create_dynamic_model, get_table_name_with_prefix
+from .models import DiscordLink, AgeVet, Base, AgeVetBase, create_dynamic_model, get_table_name_with_prefix
 
 log = logging.getLogger("red.ckeytools.database")
 
@@ -348,3 +349,173 @@ class DatabaseManager:
                 .order_by(model.timestamp.desc())
             )
             return result.scalars().all()
+
+
+class AgeVetDatabaseManager:
+    """
+    Manages MariaDB/MySQL connections for BackgroundCheck AgeVet data.
+
+    Uses the same host/port/user/password as the main cog DB, but a separate
+    database name. Table schema matches Django's ``bc_vetting_agevet``.
+    """
+
+    def __init__(self):
+        self.engines: Dict[int, Any] = {}
+        self.session_makers: Dict[int, Any] = {}
+        self.databases: Dict[int, str] = {}
+
+    async def connect_guild(
+        self,
+        guild_id: int,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+    ) -> bool:
+        """
+        Connect a guild to the AgeVet MariaDB/MySQL database.
+
+        Args:
+            guild_id: Discord guild ID
+            host: Database host (shared with main cog DB)
+            port: Database port
+            user: Database username
+            password: Database password
+            database: AgeVet database name (separate from SS13 discord_links DB)
+        """
+        try:
+            await self.disconnect_guild(guild_id)
+
+            url = (
+                f"mysql+aiomysql://{quote_plus(user)}:{quote_plus(password)}"
+                f"@{host}:{port}/{database}?charset=utf8mb4"
+            )
+
+            engine = create_async_engine(
+                url,
+                echo=False,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+            )
+            session_maker = async_sessionmaker(
+                bind=engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+
+            # Ensure the AgeVet table exists (works standalone or alongside Django migrations).
+            async with engine.begin() as conn:
+                await conn.run_sync(AgeVetBase.metadata.create_all, checkfirst=True)
+
+            self.engines[guild_id] = engine
+            self.session_makers[guild_id] = session_maker
+            self.databases[guild_id] = database
+
+            log.info(f"Connected to AgeVet database '{database}' for guild {guild_id}")
+            return True
+
+        except Exception as e:
+            log.error(f"Failed to connect AgeVet database for guild {guild_id}: {e}")
+            await self.disconnect_guild(guild_id)
+            return False
+
+    async def disconnect_guild(self, guild_id: int):
+        """Disconnect the AgeVet database for a guild."""
+        try:
+            if guild_id in self.engines:
+                engine = self.engines[guild_id]
+                if engine:
+                    await engine.dispose()
+                del self.engines[guild_id]
+
+            self.session_makers.pop(guild_id, None)
+            self.databases.pop(guild_id, None)
+
+            log.info(f"Disconnected AgeVet database for guild {guild_id}")
+        except Exception as e:
+            log.error(f"Error disconnecting AgeVet database for guild {guild_id}: {e}")
+
+    async def disconnect_all(self):
+        """Disconnect all AgeVet databases."""
+        for guild_id in list(self.engines.keys()):
+            await self.disconnect_guild(guild_id)
+
+    def is_connected(self, guild_id: int) -> bool:
+        """Check if a guild has an active AgeVet database connection."""
+        return guild_id in self.engines and guild_id in self.session_makers
+
+    @asynccontextmanager
+    async def get_session(self, guild_id: int):
+        """Yield an AsyncSession for the guild's AgeVet database."""
+        if not self.is_connected(guild_id):
+            raise RuntimeError(f"Guild {guild_id} is not connected to AgeVet database")
+
+        session_maker = self.session_makers[guild_id]
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def get_record(self, guild_id: int, ckey: str) -> Optional[Dict[str, Any]]:
+        """Get an AgeVet record by ckey, or None if not found."""
+        async with self.get_session(guild_id) as session:
+            result = await session.execute(
+                select(AgeVet).where(AgeVet.ckey == ckey).limit(1)
+            )
+            record = result.scalar_one_or_none()
+            return record.to_dict() if record else None
+
+    async def get_all_records(self, guild_id: int) -> List[Dict[str, Any]]:
+        """Get all AgeVet records."""
+        async with self.get_session(guild_id) as session:
+            result = await session.execute(select(AgeVet).order_by(AgeVet.created_at.desc()))
+            return [record.to_dict() for record in result.scalars().all()]
+
+    async def create_record(self, guild_id: int, ckey: str, date_of_birth: date) -> Dict[str, Any]:
+        """Create a new AgeVet record."""
+        async with self.get_session(guild_id) as session:
+            existing = await session.get(AgeVet, ckey)
+            if existing:
+                raise ValueError(f"AgeVet record for ckey '{ckey}' already exists")
+
+            record = AgeVet(ckey=ckey, date_of_birth=date_of_birth)
+            session.add(record)
+            try:
+                await session.flush()
+                await session.refresh(record)
+            except IntegrityError as e:
+                raise ValueError(f"AgeVet record for ckey '{ckey}' already exists") from e
+
+            log.info(f"Created AgeVet record for ckey '{ckey}'")
+            return record.to_dict()
+
+    async def update_record(self, guild_id: int, ckey: str, date_of_birth: date) -> Dict[str, Any]:
+        """Update an existing AgeVet record's date of birth."""
+        async with self.get_session(guild_id) as session:
+            record = await session.get(AgeVet, ckey)
+            if not record:
+                raise ValueError(f"AgeVet record for ckey '{ckey}' not found")
+
+            record.date_of_birth = date_of_birth
+            await session.flush()
+            await session.refresh(record)
+
+            log.info(f"Updated AgeVet record for ckey '{ckey}'")
+            return record.to_dict()
+
+    async def delete_record(self, guild_id: int, ckey: str) -> bool:
+        """Delete an AgeVet record. Returns True if deleted."""
+        async with self.get_session(guild_id) as session:
+            record = await session.get(AgeVet, ckey)
+            if not record:
+                raise ValueError(f"AgeVet record for ckey '{ckey}' not found")
+
+            await session.delete(record)
+            log.info(f"Deleted AgeVet record for ckey '{ckey}'")
+            return True

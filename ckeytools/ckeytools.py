@@ -12,9 +12,8 @@ import hashlib
 import datetime
 from discord import ui
 from .helpers import normalise_to_ckey
-from .database import DatabaseManager
+from .database import DatabaseManager, AgeVetDatabaseManager
 import tomlkit
-import aiohttp
 import csv
 import io
 import random
@@ -45,6 +44,7 @@ class CkeyTools(commands.Cog):
         self.log = logging.getLogger("red.ckeytools")
         self.config = Config.get_conf(self, identifier=908039527271104514, force_registration=True)
         self.db_manager = DatabaseManager()
+        self.agevet_db = AgeVetDatabaseManager()
         # Per-guild config
         default_guild: Dict[str, Any] = {
             "ticket_channel": None,  # Channel ID for ticket panel
@@ -74,10 +74,9 @@ class CkeyTools(commands.Cog):
             "autoroles_config_folder": None,
             "autoroles_file_name": "donator.toml",
             "autoroles_role_paths": {},  # {role_id(str): "path.to.key"}
-            # agevet system
+            # agevet system (MariaDB/MySQL; shares host/user/password with main DB)
             "agevet_enabled": False,  # Whether age vetting system is enabled
-            "agevet_api_url": None,  # BackgroundCheck API URL
-            "agevet_api_key": None,  # API key for BackgroundCheck
+            "agevet_db_name": None,  # Separate database name for AgeVet records
             "agevet_role": None,  # Role ID to assign to age-vetted users
             # agegate system (integrated with verification tickets)
             "agegate_enabled": False,  # Whether age gate system is enabled in tickets
@@ -124,12 +123,18 @@ class CkeyTools(commands.Cog):
                 conf = await self.config.guild(guild).all()
                 if all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"], conf["db_name"]]):
                     await self.reconnect_database(guild)
+                elif (
+                    conf.get("agevet_db_name")
+                    and all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"]])
+                ):
+                    await self.reconnect_agevet_database(guild)
             except Exception as e:
                 self.log.error(f"Failed to connect database for guild {guild.name} during delayed initialization: {e}")
 
     async def cog_unload(self):
         # Close all database connections when cog is unloaded
         await self.db_manager.disconnect_all()
+        await self.agevet_db.disconnect_all()
         # Stop autoroles periodic updater
         try:
             if self.autoroles_update.is_running():
@@ -155,6 +160,46 @@ class CkeyTools(commands.Cog):
             self.log.info(f"Connected to database for guild {guild.name} ({guild.id})")
         else:
             self.log.error(f"Failed to connect to database for guild {guild.name} ({guild.id})")
+
+        # AgeVet reuses the same credentials; reconnect it when the main DB settings change.
+        if conf.get("agevet_db_name") and all(
+            [conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"]]
+        ):
+            await self.reconnect_agevet_database(guild)
+
+    async def reconnect_agevet_database(self, guild):
+        """Reconnect the AgeVet MariaDB database using shared cog credentials."""
+        conf = await self.config.guild(guild).all()
+        db_name = conf.get("agevet_db_name")
+        if not db_name:
+            await self.agevet_db.disconnect_guild(guild.id)
+            return False
+
+        if not all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"]]):
+            self.log.error(
+                f"Cannot connect AgeVet database for guild {guild.name}: "
+                "main database credentials are incomplete"
+            )
+            await self.agevet_db.disconnect_guild(guild.id)
+            return False
+
+        success = await self.agevet_db.connect_guild(
+            guild_id=guild.id,
+            host=conf["db_host"],
+            port=conf["db_port"],
+            user=conf["db_user"],
+            password=conf["db_password"],
+            database=db_name,
+        )
+        if success:
+            self.log.info(
+                f"Connected to AgeVet database '{db_name}' for guild {guild.name} ({guild.id})"
+            )
+        else:
+            self.log.error(
+                f"Failed to connect to AgeVet database '{db_name}' for guild {guild.name} ({guild.id})"
+            )
+        return success
 
 
     # Root command group for this cog
@@ -1951,12 +1996,9 @@ class CkeyTools(commands.Cog):
             await ctx.send("❌ Database is not connected. Please configure the database connection first.")
             return
 
-        # Check if API is configured
-        try:
-            await self._get_agevet_headers(ctx.guild)
-            await self._get_agevet_url(ctx.guild)
-        except ValueError as e:
-            await ctx.send(f"❌ Age verification API not configured: {e}")
+        # Check if AgeVet database is connected
+        if not self.agevet_db.is_connected(ctx.guild.id):
+            await ctx.send("❌ AgeVet database is not connected. Configure it with `[p]ckeytools agevet config dbname`.")
             return
 
         async with ctx.typing():
@@ -2313,6 +2355,8 @@ class CkeyTools(commands.Cog):
         Returns (success: bool) - True if user has agevet record, False otherwise.
         """
         if not self.db_manager.is_connected(guild.id):
+            return False
+        if not self.agevet_db.is_connected(guild.id):
             return False
 
         try:
@@ -3048,101 +3092,42 @@ class CkeyTools(commands.Cog):
         return base
 
     # =========================
-    # agevet HTTP client methods
+    # agevet database methods
     # =========================
 
-    async def _get_agevet_headers(self, guild):
-        """Get headers for agevet API requests."""
-        api_key = await self.config.guild(guild).agevet_api_key()
-        if not api_key:
-            raise ValueError("AgeVet API key not configured")
-        return {"X-API-Key": api_key, "Content-Type": "application/json"}
-
-    async def _get_agevet_url(self, guild):
-        """Get the agevet API URL for the guild."""
-        api_url = await self.config.guild(guild).agevet_api_url()
-        if not api_url:
-            raise ValueError("AgeVet API URL not configured")
-        return api_url.rstrip("/") + "/api/agevet/"
-
-    async def _make_agevet_request(self, guild, method, data=None, params=None):
-        """Make an HTTP request to the agevet API."""
-        try:
-            url = await self._get_agevet_url(guild)
-            headers = await self._get_agevet_headers(guild)
-
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=data,
-                    params=params
-                ) as response:
-                    response_data = await response.json()
-
-                    if response.status >= 400:
-                        error_msg = response_data.get('error', f'HTTP {response.status}')
-                        raise aiohttp.ClientError(f"API Error: {error_msg}")
-
-                    return response_data, response.status
-        except aiohttp.ClientError as e:
-            self.log.error(f"AgeVet API request failed: {e}")
-            raise
-        except Exception as e:
-            self.log.error(f"Unexpected error in agevet API request: {e}")
-            raise
+    def _ensure_agevet_db(self, guild):
+        """Raise if the AgeVet database is not connected for this guild."""
+        if not self.agevet_db.is_connected(guild.id):
+            raise ValueError(
+                "AgeVet database not connected. Configure a database name with "
+                "`[p]ckeytools agevet config dbname` (uses the same host/user/password "
+                "as `[p]ckeytools database`)."
+            )
 
     async def get_agevet_record(self, guild, ckey):
         """Get an agevet record by ckey."""
-        try:
-            data, status = await self._make_agevet_request(
-                guild, "GET", params={"ckey": ckey, "fields": "ckey,date_of_birth,created_at"}
-            )
-            return data
-        except aiohttp.ClientError as e:
-            if "Not found" in str(e):
-                return None
-            raise
+        self._ensure_agevet_db(guild)
+        return await self.agevet_db.get_record(guild.id, ckey)
 
     async def create_agevet_record(self, guild, ckey, date_of_birth):
         """Create a new agevet record."""
-        data = {
-            "ckey": ckey,
-            "date_of_birth": date_of_birth.isoformat()
-        }
-        try:
-            response_data, status = await self._make_agevet_request(guild, "POST", data=data)
-            return response_data
-        except aiohttp.ClientError as e:
-            if "already exists" in str(e).lower() or "unique constraint" in str(e).lower():
-                raise ValueError(f"AgeVet record for ckey '{ckey}' already exists")
-            raise
+        self._ensure_agevet_db(guild)
+        return await self.agevet_db.create_record(guild.id, ckey, date_of_birth)
 
     async def update_agevet_record(self, guild, ckey, date_of_birth):
         """Update an existing agevet record."""
-        data = {
-            "ckey": ckey,
-            "date_of_birth": date_of_birth.isoformat()
-        }
-        try:
-            response_data, status = await self._make_agevet_request(guild, "PATCH", data=data)
-            return response_data
-        except aiohttp.ClientError as e:
-            if "Not found" in str(e):
-                raise ValueError(f"AgeVet record for ckey '{ckey}' not found")
-            raise
+        self._ensure_agevet_db(guild)
+        return await self.agevet_db.update_record(guild.id, ckey, date_of_birth)
 
     async def delete_agevet_record(self, guild, ckey):
         """Delete an agevet record."""
-        data = {"ckey": ckey}
-        try:
-            response_data, status = await self._make_agevet_request(guild, "DELETE", data=data)
-            return response_data
-        except aiohttp.ClientError as e:
-            if "Not found" in str(e):
-                raise ValueError(f"AgeVet record for ckey '{ckey}' not found")
-            raise
+        self._ensure_agevet_db(guild)
+        return await self.agevet_db.delete_record(guild.id, ckey)
+
+    async def get_all_agevet_records(self, guild):
+        """Get all agevet records."""
+        self._ensure_agevet_db(guild)
+        return await self.agevet_db.get_all_records(guild.id)
 
     def _parse_date_of_birth(self, date_string: str) -> datetime.date:
         """Parse a date string into a date object with flexible format support."""
@@ -3258,12 +3243,8 @@ class CkeyTools(commands.Cog):
             if not agevet_enabled:
                 return False  # Agevet system not enabled
 
-            # Check if API is configured
-            try:
-                await self._get_agevet_headers(guild)
-                await self._get_agevet_url(guild)
-            except ValueError:
-                return False  # API not configured
+            if not self.agevet_db.is_connected(guild.id):
+                return False  # AgeVet database not connected
 
             # Check if user is age vetted
             try:
@@ -3544,12 +3525,9 @@ class CkeyTools(commands.Cog):
             await ctx.send("❌ Database is not connected. Please configure the database connection first.")
             return
 
-        # Check if API is configured
-        try:
-            await self._get_agevet_headers(ctx.guild)
-            await self._get_agevet_url(ctx.guild)
-        except ValueError as e:
-            await ctx.send(f"❌ Age verification API not configured: {e}")
+        # Check if AgeVet database is connected
+        if not self.agevet_db.is_connected(ctx.guild.id):
+            await ctx.send("❌ AgeVet database is not connected. Configure it with `[p]ckeytools agevet config dbname`.")
             return
 
         async with ctx.typing():
@@ -3632,27 +3610,58 @@ class CkeyTools(commands.Cog):
             await ctx.send("✅ Age verification system has been disabled.")
         await ctx.tick()
 
-    @agevet_config.command(name="apiurl")
-    async def agevet_config_api_url(self, ctx: commands.Context, *, api_url: str):
-        """Set the BackgroundCheck API URL."""
-        # Basic validation
-        if not api_url.startswith(('http://', 'https://')):
-            await ctx.send("❌ API URL must start with http:// or https://")
+    @agevet_config.command(name="dbname")
+    async def agevet_config_db_name(self, ctx: commands.Context, *, db_name: str):
+        """
+        Set the MariaDB/MySQL database name used for AgeVet records.
+
+        Uses the same host, port, user, and password as
+        `[p]ckeytools database`. Only the database name differs.
+
+        Example:
+        `[p]ckeytools agevet config dbname backgroundcheck`
+        """
+        name = db_name.strip()
+        if not name:
+            await ctx.send("❌ Database name cannot be empty.")
             return
 
-        await self.config.guild(ctx.guild).agevet_api_url.set(api_url.rstrip('/'))
-        await ctx.send(f"✅ AgeVet API URL set to `{api_url.rstrip('/')}`")
+        conf = await self.config.guild(ctx.guild).all()
+        if not all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"]]):
+            await ctx.send(
+                "❌ Main database credentials are incomplete. "
+                "Configure `[p]ckeytools database` host/port/user/password first."
+            )
+            return
+
+        await self.config.guild(ctx.guild).agevet_db_name.set(name)
+        success = await self.reconnect_agevet_database(ctx.guild)
+        if success:
+            await ctx.send(
+                f"✅ AgeVet database name set to `{name}` and connected "
+                f"(host `{conf['db_host']}:{conf['db_port']}`)."
+            )
+        else:
+            await ctx.send(
+                f"⚠️ Name saved as `{name}`, but connection failed. "
+                "Check that the database exists and the shared credentials can access it, "
+                "then use `[p]ckeytools agevet config reconnect`."
+            )
         await ctx.tick()
 
-    @agevet_config.command(name="apikey")
-    async def agevet_config_api_key(self, ctx: commands.Context, *, api_key: str):
-        """Set the BackgroundCheck API key."""
-        if not api_key.strip():
-            await ctx.send("❌ API key cannot be empty")
+    @agevet_config.command(name="reconnect")
+    async def agevet_config_reconnect(self, ctx: commands.Context):
+        """Reconnect to the configured AgeVet MariaDB database."""
+        db_name = await self.config.guild(ctx.guild).agevet_db_name()
+        if not db_name:
+            await ctx.send("❌ No AgeVet database name configured. Use `[p]ckeytools agevet config dbname`.")
             return
 
-        await self.config.guild(ctx.guild).agevet_api_key.set(api_key.strip())
-        await ctx.send("✅ AgeVet API key set.")
+        success = await self.reconnect_agevet_database(ctx.guild)
+        if success:
+            await ctx.send(f"✅ Reconnected to AgeVet database `{db_name}`.")
+        else:
+            await ctx.send(f"❌ Failed to connect to AgeVet database `{db_name}`.")
         await ctx.tick()
 
     @agevet_config.command(name="role")
@@ -3689,20 +3698,11 @@ class CkeyTools(commands.Cog):
 
         # Check configuration
         enabled = conf["agevet_enabled"]
-        api_url = conf["agevet_api_url"]
-        api_key = conf["agevet_api_key"]
+        db_name = conf.get("agevet_db_name")
         role_id = conf["agevet_role"]
-
-        # Check API connectivity
-        api_configured = bool(api_url and api_key)
-        api_connected = False
-        if api_configured:
-            try:
-                await self._get_agevet_headers(ctx.guild)
-                await self._get_agevet_url(ctx.guild)
-                api_connected = True
-            except Exception:
-                pass
+        creds_ok = all([conf["db_host"], conf["db_port"], conf["db_user"], conf["db_password"]])
+        db_configured = bool(db_name) and creds_ok
+        db_connected = self.agevet_db.is_connected(ctx.guild.id)
 
         # Get role info
         role = ctx.guild.get_role(role_id) if role_id else None
@@ -3720,14 +3720,14 @@ class CkeyTools(commands.Cog):
         )
 
         embed.add_field(
-            name="🌐 API Configuration",
-            value="✅ Configured" if api_configured else "❌ Not configured",
+            name="🗄️ AgeVet DB Config",
+            value="✅ Configured" if db_configured else "❌ Not configured",
             inline=True
         )
 
         embed.add_field(
-            name="🔗 API Connection",
-            value="✅ Connected" if api_connected else "❌ Failed",
+            name="🔗 AgeVet DB Connection",
+            value="✅ Connected" if db_connected else "❌ Not connected",
             inline=True
         )
 
@@ -3738,15 +3738,18 @@ class CkeyTools(commands.Cog):
         )
 
         embed.add_field(
-            name="🗄️ Database",
+            name="🗄️ Ckey Database",
             value="✅ Connected" if self.db_manager.is_connected(ctx.guild.id) else "❌ Not connected",
             inline=True
         )
 
-        if api_url:
+        if db_name:
             embed.add_field(
-                name="🔗 API URL",
-                value=f"`{api_url}`",
+                name="📁 AgeVet Database",
+                value=(
+                    f"`{db_name}` on `{conf['db_host']}:{conf['db_port']}`\n"
+                    f"(shared credentials with ckey DB)"
+                ),
                 inline=False
             )
 
@@ -3769,6 +3772,10 @@ class CkeyTools(commands.Cog):
         # Check if database is connected
         if not self.db_manager.is_connected(ctx.guild.id):
             await ctx.send("❌ Database is not connected.")
+            return
+
+        if not self.agevet_db.is_connected(ctx.guild.id):
+            await ctx.send("❌ AgeVet database is not connected. Configure it with `[p]ckeytools agevet config dbname`.")
             return
 
         async with ctx.typing():
@@ -3806,12 +3813,20 @@ class CkeyTools(commands.Cog):
                 embed.add_field(name="Ckey", value=f"`{ckey}`", inline=True)
 
                 if record:
-                    dob = datetime.datetime.fromisoformat(record['date_of_birth']).date()
-                    created_at = datetime.datetime.fromisoformat(record['created_at'].replace('Z', '+00:00'))
+                    dob_raw = record.get('date_of_birth')
+                    created_raw = record.get('created_at')
+                    if dob_raw:
+                        dob = datetime.date.fromisoformat(str(dob_raw)[:10])
+                        embed.add_field(name="Date of Birth", value=dob.strftime("%B %d, %Y"), inline=True)
+                        embed.add_field(name="Age", value=f"{self._calculate_age(dob)} years old", inline=True)
+                    else:
+                        embed.add_field(name="Date of Birth", value="❌ Not set", inline=True)
 
-                    embed.add_field(name="Date of Birth", value=dob.strftime("%B %d, %Y"), inline=True)
-                    embed.add_field(name="Age", value=f"{self._calculate_age(dob)} years old", inline=True)
-                    embed.add_field(name="Vetted Since", value=f"<t:{int(created_at.timestamp())}:R>", inline=True)
+                    if created_raw:
+                        created_at = datetime.datetime.fromisoformat(str(created_raw).replace('Z', '+00:00'))
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=datetime.timezone.utc)
+                        embed.add_field(name="Vetted Since", value=f"<t:{int(created_at.timestamp())}:R>", inline=True)
                 else:
                     embed.add_field(name="Status", value="❌ Not age verified", inline=True)
 
@@ -3837,7 +3852,7 @@ class CkeyTools(commands.Cog):
 
         This command will:
         1. Get the user's linked ckey from the database
-        2. Delete their age verification record from the BackgroundCheck API
+        2. Delete their age verification record from the AgeVet database
         3. Remove the agevet role if they have it
 
         Examples:
@@ -3858,12 +3873,9 @@ class CkeyTools(commands.Cog):
             await ctx.send("❌ Database is not connected. Please configure the database connection first.")
             return
 
-        # Check if API is configured
-        try:
-            await self._get_agevet_headers(ctx.guild)
-            await self._get_agevet_url(ctx.guild)
-        except ValueError as e:
-            await ctx.send(f"❌ Age verification API not configured: {e}")
+        # Check if AgeVet database is connected
+        if not self.agevet_db.is_connected(ctx.guild.id):
+            await ctx.send("❌ AgeVet database is not connected. Configure it with `[p]ckeytools agevet config dbname`.")
             return
 
         async with ctx.typing():
@@ -3934,7 +3946,7 @@ class CkeyTools(commands.Cog):
 
         This command will:
         1. Parse the CSV file
-        2. Create age verification records in the BackgroundCheck API
+        2. Create age verification records in the AgeVet database
         3. Find Discord users linked to those ckeys
         4. Assign the agevet role to verified users
 
@@ -3955,12 +3967,9 @@ class CkeyTools(commands.Cog):
             await ctx.send("❌ Database is not connected. Please configure the database connection first.")
             return
 
-        # Check if API is configured
-        try:
-            await self._get_agevet_headers(ctx.guild)
-            await self._get_agevet_url(ctx.guild)
-        except ValueError as e:
-            await ctx.send(f"❌ Age verification API not configured: {e}")
+        # Check if AgeVet database is connected
+        if not self.agevet_db.is_connected(ctx.guild.id):
+            await ctx.send("❌ AgeVet database is not connected. Configure it with `[p]ckeytools agevet config dbname`.")
             return
 
         # Check for CSV file attachment
@@ -4134,7 +4143,7 @@ class CkeyTools(commands.Cog):
         Sync age verification roles for all users in the guild.
 
         This command will:
-        1. Fetch all age verification records from the BackgroundCheck API
+        1. Fetch all age verification records from the AgeVet database
         2. For each vetted ckey, find the corresponding Discord user in the database
         3. Assign the agevet role to users who are vetted but don't have the role
         4. Optionally remove the role from users who have it but aren't vetted
@@ -4142,7 +4151,7 @@ class CkeyTools(commands.Cog):
         This is useful for:
         - Initial setup after configuring the agevet system
         - Recovering from role misconfigurations
-        - Ensuring role consistency with the BackgroundCheck database
+        - Ensuring role consistency with the AgeVet database
 
         Use: `[p]ckeytools agevet sync`
         """
@@ -4161,12 +4170,9 @@ class CkeyTools(commands.Cog):
             await ctx.send("❌ Database is not connected. Please configure the database connection first.")
             return
 
-        # Check if API is configured
-        try:
-            await self._get_agevet_headers(ctx.guild)
-            api_url = await self._get_agevet_url(ctx.guild)
-        except ValueError as e:
-            await ctx.send(f"❌ Age verification API not configured: {e}")
+        # Check if AgeVet database is connected
+        if not self.agevet_db.is_connected(ctx.guild.id):
+            await ctx.send("❌ AgeVet database is not connected. Configure it with `[p]ckeytools agevet config dbname`.")
             return
 
         # Check if agevet role is configured
@@ -4184,25 +4190,9 @@ class CkeyTools(commands.Cog):
 
         async with ctx.typing():
             try:
-                # Fetch all age verification records from the API
+                # Fetch all age verification records from the database
                 self.log.info(f"Fetching all age verification records for guild {ctx.guild.name}")
-
-                # Make a GET request to fetch all records (without ckey filter)
-                headers = await self._get_agevet_headers(ctx.guild)
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url=api_url.rstrip('/'),
-                        headers=headers,
-                        params={"fields": "ckey,date_of_birth,created_at"}
-                    ) as response:
-                        if response.status >= 400:
-                            response_data = await response.json()
-                            error_msg = response_data.get('error', f'HTTP {response.status}')
-                            await initial_message.edit(content=f"❌ API Error: {error_msg}")
-                            return
-
-                        agevet_records = await response.json()
+                agevet_records = await self.get_all_agevet_records(ctx.guild)
 
                 if not isinstance(agevet_records, list):
                     agevet_records = [agevet_records] if agevet_records else []
@@ -4281,7 +4271,7 @@ class CkeyTools(commands.Cog):
                     timestamp=discord.utils.utcnow()
                 )
 
-                embed.add_field(name="📊 Total Records in API", value=str(len(agevet_records)), inline=True)
+                embed.add_field(name="📊 Total Records in DB", value=str(len(agevet_records)), inline=True)
                 embed.add_field(name="✅ Roles Assigned", value=str(roles_assigned), inline=True)
                 embed.add_field(name="🔄 Already Had Role", value=str(roles_already_had), inline=True)
                 embed.add_field(name="👻 Users Not in Server", value=str(users_not_found), inline=True)

@@ -1,0 +1,24 @@
+{
+    "id": 998023941,
+    "title": "__Verify your AGE__",
+    "description": "This server is explicitly for people over the age of 18. Minors are not allowed to enter the server, and in order to ensure you're old enough to enter, we'll require you to prove it through a verifiable document.",
+    "color": 16732144,
+    "author": {
+        "name": "S.P.L.U.R.T."
+    },
+    "fields": [
+        {
+            "id": 920864977,
+            "name": "What to send?",
+            "value": "In order to verify you're of age we only require two things:\n1. **A censored ID or document** that is valid and has a DoB on it. Please make sure to __black out anything relating to personal information__, such as your name and picture, we only ask that you leave **information relating to what country/state it was issued from and of course __your DoB uncovered__**.\n2. In the same picture, a **piece of paper or otherwise** with the code `[CODE]` written on it. This is to make sure the picture is recent"
+        },
+        {
+            "id": 70458740,
+            "name": "Your sensitive information is NOT recorded",
+            "value": "The pictures you send are immediately deleted upon verification, and we do not record any personal information such as your Name or Residence. We only keep your DoB for safety purposes."
+        }
+    ],
+    "image": {
+        "url": "https://i.ibb.co/WWXjNGcw/image-2026-01-03-025127538.png"
+    }
+}

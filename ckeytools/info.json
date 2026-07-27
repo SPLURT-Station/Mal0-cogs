@@ -5,7 +5,7 @@
     "name": "CkeyTools",
     "short": "SS13 verification, autoroles, and autodonator tools",
     "description": "Link Discord users to SS13 ckeys via MySQL with ticket-based verification, auto-verification, and configurable role assignment. Includes an autodonator system that exports role-mapped ckey lists to TOML with arbitrary nested paths.",
-    "install_msg": "Thanks for installing CkeyTools! Use [p]ckeytools to configure verification ([p]ckeytools verify ...) and database settings ([p]ckeytools database ...). Set up the database first, then configure the verification panel and roles. Autodonator is available under [p]ckeytools autodonator ...",
+    "install_msg": "Thanks for installing CkeyTools! Use [p]ckeytools to configure verification ([p]ckeytools verify ...) and database settings ([p]ckeytools database ...). Set up the SS13 database first, then configure the verification panel and roles. For age vetting, set [p]ckeytools agevet config dbname to a separate MariaDB database (same host/user/password as the ckey DB). Autodonator is available under [p]ckeytools autodonator ...",
     "requirements": [
         "aiomysql",
         "sqlalchemy[asyncio]",
